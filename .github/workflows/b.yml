@@ -1,0 +1,122 @@
+name: Matrix B
+
+on:
+  workflow_dispatch:
+    inputs:
+      capsule_id:
+        description: 32-character case identifier
+        required: true
+        type: string
+  push:
+    paths:
+      - 'cases/b/*.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: matrix-b-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    steps:
+      - name: Prepare workspace
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Configure runtime
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Validate fixtures
+        run: python -m unittest discover -s tests -v
+
+      - name: Resolve case
+        id: capsule
+        shell: bash
+        env:
+          DISPATCH_CAPSULE: ${{ inputs.capsule_id }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            capsule="${DISPATCH_CAPSULE}"
+          else
+            mapfile -t trigger_files < <(
+              git diff-tree --no-commit-id --name-only -r "${GITHUB_SHA}" \
+                | grep -E '^cases/b/[0-9a-f]{32}\.txt$'
+            )
+            if [[ "${#trigger_files[@]}" -ne 1 ]]; then
+              echo "::error title=Case trigger invalid::Expected exactly one case trigger file."
+              exit 2
+            fi
+            capsule="$(tr -d '\r\n' < "${trigger_files[0]}")"
+          fi
+          if [[ ! "${capsule}" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::error title=Case identifier invalid::Identifier must be 32 lowercase hexadecimal characters."
+            exit 2
+          fi
+          echo "capsule_id=${capsule}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check access
+        shell: bash
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        run: |
+          if [[ -z "${LAB_QUEUE_TOKEN}" ]]; then
+            echo "::error title=Access check failed::Required runtime key is missing."
+            exit 2
+          fi
+
+      - name: Run selected case
+        shell: bash
+        env:
+          RELAY_CAPSULE_ID: ${{ steps.capsule.outputs.capsule_id }}
+          LAB_QUEUE_REPOSITORY: shengtenghou4-star/00
+          LAB_QUEUE_REF: main
+          LAB_QUEUE_WRITE_BRANCH: results
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          RELAY_RUN_ID: ${{ github.run_id }}
+          RELAY_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set +e
+          relay_output="$(python scripts/b.py 2>&1)"
+          relay_status=$?
+          printf '%s\n' "${relay_output}"
+          if [[ ${relay_status} -ne 0 ]]; then
+            detail="$(printf '%s\n' "${relay_output}" | tail -n 1 | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
+            if [[ -z "${detail}" ]]; then
+              detail="Case exited with status ${relay_status}."
+            fi
+            echo "::error title=Case failed::${detail}"
+            exit "${relay_status}"
+          fi
+
+      - name: Verify case output
+        shell: bash
+        env:
+          RELAY_CAPSULE_ID: ${{ steps.capsule.outputs.capsule_id }}
+          LAB_QUEUE_REPOSITORY: shengtenghou4-star/00
+          LAB_QUEUE_REF: main
+          LAB_QUEUE_WRITE_BRANCH: results
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          RELAY_RUN_ID: ${{ github.run_id }}
+          RELAY_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set +e
+          verify_output="$(python scripts/b_check.py 2>&1)"
+          verify_status=$?
+          printf '%s\n' "${verify_output}"
+          if [[ ${verify_status} -ne 0 ]]; then
+            detail="$(printf '%s\n' "${verify_output}" | tail -n 1 | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
+            if [[ -z "${detail}" ]]; then
+              detail="Output verification exited with status ${verify_status}."
+            fi
+            echo "::error title=Output check failed::${detail}"
+            exit "${verify_status}"
+          fi
