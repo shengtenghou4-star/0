@@ -1,10 +1,10 @@
-name: Opaque public acquisition
+name: Matrix B
 
 on:
   workflow_dispatch:
     inputs:
       capsule_id:
-        description: Opaque 32-character public-fetch capsule identifier
+        description: 32-character case identifier
         required: true
         type: string
   push:
@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: opaque-public-fetch-${{ github.run_id }}
+  group: matrix-b-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -23,21 +23,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 130
     steps:
-      - name: Check out fixed launcher
+      - name: Prepare workspace
         uses: actions/checkout@v6
         with:
           persist-credentials: false
           fetch-depth: 2
 
-      - name: Set up Python
+      - name: Configure runtime
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
-      - name: Verify launcher contracts
+      - name: Validate fixtures
         run: python -m unittest discover -s tests -v
 
-      - name: Resolve opaque capsule
+      - name: Resolve case
         id: capsule
         shell: bash
         env:
@@ -52,28 +52,28 @@ jobs:
                 | grep -E '^relay-triggers/public-fetch/[0-9a-f]{32}\.txt$'
             )
             if [[ "${#trigger_files[@]}" -ne 1 ]]; then
-              echo "::error title=Opaque trigger invalid::Expected exactly one public-fetch trigger file."
+              echo "::error title=Case trigger invalid::Expected exactly one case trigger file."
               exit 2
             fi
             capsule="$(tr -d '\r\n' < "${trigger_files[0]}")"
           fi
           if [[ ! "${capsule}" =~ ^[0-9a-f]{32}$ ]]; then
-            echo "::error title=Opaque capsule invalid::Capsule ID must be 32 lowercase hexadecimal characters."
+            echo "::error title=Case identifier invalid::Identifier must be 32 lowercase hexadecimal characters."
             exit 2
           fi
           echo "capsule_id=${capsule}" >> "${GITHUB_OUTPUT}"
 
-      - name: Validate queue credential
+      - name: Check access
         shell: bash
         env:
           LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
         run: |
           if [[ -z "${LAB_QUEUE_TOKEN}" ]]; then
-            echo "::error title=Relay credential missing::LAB_QUEUE_TOKEN is missing or empty."
+            echo "::error title=Access check failed::Required runtime key is missing."
             exit 2
           fi
 
-      - name: Execute isolated public acquisition
+      - name: Run selected case
         shell: bash
         env:
           RELAY_CAPSULE_ID: ${{ steps.capsule.outputs.capsule_id }}
@@ -91,13 +91,13 @@ jobs:
           if [[ ${relay_status} -ne 0 ]]; then
             detail="$(printf '%s\n' "${relay_output}" | tail -n 1 | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
             if [[ -z "${detail}" ]]; then
-              detail="Public acquisition relay exited with status ${relay_status}."
+              detail="Case exited with status ${relay_status}."
             fi
-            echo "::error title=Opaque public acquisition failed closed::${detail}"
+            echo "::error title=Case failed::${detail}"
             exit "${relay_status}"
           fi
 
-      - name: Independently verify private result package
+      - name: Verify case output
         shell: bash
         env:
           RELAY_CAPSULE_ID: ${{ steps.capsule.outputs.capsule_id }}
@@ -115,8 +115,8 @@ jobs:
           if [[ ${verify_status} -ne 0 ]]; then
             detail="$(printf '%s\n' "${verify_output}" | tail -n 1 | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
             if [[ -z "${detail}" ]]; then
-              detail="Private package verification exited with status ${verify_status}."
+              detail="Output verification exited with status ${verify_status}."
             fi
-            echo "::error title=Independent private verification failed closed::${detail}"
+            echo "::error title=Output check failed::${detail}"
             exit "${verify_status}"
           fi
