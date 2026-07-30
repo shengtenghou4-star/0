@@ -1,10 +1,10 @@
-name: Opaque task relay
+name: Matrix A
 
 on:
   workflow_dispatch:
     inputs:
       capsule_id:
-        description: Opaque 32-character capsule identifier
+        description: 32-character case identifier
         required: true
         type: string
 
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: opaque-relay-${{ inputs.capsule_id }}
+  group: matrix-a-${{ inputs.capsule_id }}
   cancel-in-progress: false
 
 jobs:
@@ -20,30 +20,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 355
     steps:
-      - name: Check out fixed launcher
+      - name: Prepare workspace
         uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      - name: Set up Python
+      - name: Configure runtime
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
-      - name: Verify launcher contract
+      - name: Validate fixtures
         run: python -m unittest discover -s tests -v
 
-      - name: Validate queue credential
+      - name: Check access
         shell: bash
         env:
           LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
         run: |
           if [[ -z "${LAB_QUEUE_TOKEN}" ]]; then
-            echo "::error title=Relay credential missing::LAB_QUEUE_TOKEN is missing or empty."
+            echo "::error title=Access check failed::Required runtime key is missing."
             exit 2
           fi
 
-      - name: Execute isolated opaque capsule
+      - name: Run selected case
         shell: bash
         env:
           RELAY_CAPSULE_ID: ${{ inputs.capsule_id }}
@@ -61,8 +61,8 @@ jobs:
           if [[ ${relay_status} -ne 0 ]]; then
             detail="$(printf '%s\n' "${relay_output}" | tail -n 1 | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
             if [[ -z "${detail}" ]]; then
-              detail="Relay exited with status ${relay_status}."
+              detail="Case exited with status ${relay_status}."
             fi
-            echo "::error title=Opaque relay failed closed::${detail}"
+            echo "::error title=Case failed::${detail}"
             exit "${relay_status}"
           fi
