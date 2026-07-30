@@ -16,6 +16,7 @@ from typing import Any
 
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 NUMBER_RE = re.compile(r"^[0-9]+$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 API_ROOT = "https://api.github.com"
 MAX_BINARY_BYTES = 20 * 1024 * 1024
@@ -89,16 +90,51 @@ def fetch_json(repository: str, path: str, branch: str, token: str) -> tuple[dic
     return value, raw
 
 
-def put_file(repository: str, path: str, branch: str, token: str, content: bytes, message: str) -> None:
-    payload = json.dumps(
-        {
-            "message": message,
-            "content": base64.b64encode(content).decode("ascii"),
-            "branch": branch,
-        },
-        separators=(",", ":"),
-    ).encode("utf-8")
+def fetch_content_sha(repository: str, path: str, branch: str, token: str) -> str | None:
+    try:
+        raw = api_request(contents_url(repository, path, branch), token)
+    except ToolVerificationError as exc:
+        if "HTTP 404" in str(exc):
+            return None
+        raise
+    try:
+        envelope = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ToolVerificationError("private latest-pointer envelope is malformed") from None
+    sha = envelope.get("sha") if isinstance(envelope, dict) else None
+    if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
+        raise ToolVerificationError("private latest-pointer blob SHA is invalid")
+    return sha
+
+
+def put_file(
+    repository: str,
+    path: str,
+    branch: str,
+    token: str,
+    content: bytes,
+    message: str,
+    *,
+    sha: str | None = None,
+) -> None:
+    payload_value: dict[str, Any] = {
+        "message": message,
+        "content": base64.b64encode(content).decode("ascii"),
+        "branch": branch,
+    }
+    if sha is not None:
+        if not SHA_RE.fullmatch(sha):
+            raise ToolVerificationError("replacement blob SHA is invalid")
+        payload_value["sha"] = sha
+    payload = json.dumps(payload_value, separators=(",", ":")).encode("utf-8")
     api_request(contents_url(repository, path), token, method="PUT", data=payload)
+
+
+def build_latest(certificate: dict[str, Any], prefix: str) -> dict[str, Any]:
+    value = dict(certificate)
+    value["result_prefix"] = prefix
+    value["verification_path"] = f"{prefix}/verification.json"
+    return value
 
 
 def main() -> int:
@@ -150,15 +186,29 @@ def main() -> int:
         "version": receipt.get("version"),
         "verdict": "VERIFIED",
     }
+    certificate_bytes = (json.dumps(certificate, sort_keys=True, indent=2) + "\n").encode("utf-8")
     put_file(
         repository,
         f"{prefix}/verification.json",
         branch,
         token,
-        (json.dumps(certificate, sort_keys=True, indent=2) + "\n").encode("utf-8"),
+        certificate_bytes,
         "Store independent fixed tool verification",
     )
-    print("Private fixed-tool verification stored.")
+
+    latest_path = f"relay/fixed-tools/{tool_id}/latest.json"
+    latest = build_latest(certificate, prefix)
+    latest_sha = fetch_content_sha(repository, latest_path, branch, token)
+    put_file(
+        repository,
+        latest_path,
+        branch,
+        token,
+        (json.dumps(latest, sort_keys=True, indent=2) + "\n").encode("utf-8"),
+        "Index latest verified fixed tool result",
+        sha=latest_sha,
+    )
+    print("Private fixed-tool verification stored and indexed.")
     return 0
 
 
