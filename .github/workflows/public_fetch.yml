@@ -1,0 +1,98 @@
+name: Opaque public acquisition
+
+on:
+  workflow_dispatch:
+    inputs:
+      capsule_id:
+        description: Opaque 32-character public-fetch capsule identifier
+        required: true
+        type: string
+  push:
+    paths:
+      - 'relay-triggers/public-fetch/*.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opaque-public-fetch-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    steps:
+      - name: Check out fixed launcher
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Verify launcher contracts
+        run: python -m unittest discover -s tests -v
+
+      - name: Resolve opaque capsule
+        id: capsule
+        shell: bash
+        env:
+          DISPATCH_CAPSULE: ${{ inputs.capsule_id }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            capsule="${DISPATCH_CAPSULE}"
+          else
+            mapfile -t trigger_files < <(
+              git diff-tree --no-commit-id --name-only -r "${GITHUB_SHA}" \
+                | grep -E '^relay-triggers/public-fetch/[0-9a-f]{32}\.txt$'
+            )
+            if [[ "${#trigger_files[@]}" -ne 1 ]]; then
+              echo "::error title=Opaque trigger invalid::Expected exactly one public-fetch trigger file."
+              exit 2
+            fi
+            capsule="$(tr -d '\r\n' < "${trigger_files[0]}")"
+          fi
+          if [[ ! "${capsule}" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::error title=Opaque capsule invalid::Capsule ID must be 32 lowercase hexadecimal characters."
+            exit 2
+          fi
+          echo "capsule_id=${capsule}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate queue credential
+        shell: bash
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        run: |
+          if [[ -z "${LAB_QUEUE_TOKEN}" ]]; then
+            echo "::error title=Relay credential missing::LAB_QUEUE_TOKEN is missing or empty."
+            exit 2
+          fi
+
+      - name: Execute isolated public acquisition
+        shell: bash
+        env:
+          RELAY_CAPSULE_ID: ${{ steps.capsule.outputs.capsule_id }}
+          LAB_QUEUE_REPOSITORY: shengtenghou4-star/00
+          LAB_QUEUE_REF: main
+          LAB_QUEUE_WRITE_BRANCH: results
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          RELAY_RUN_ID: ${{ github.run_id }}
+          RELAY_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set +e
+          relay_output="$(python scripts/public_fetch_runner.py 2>&1)"
+          relay_status=$?
+          printf '%s\n' "${relay_output}"
+          if [[ ${relay_status} -ne 0 ]]; then
+            detail="$(printf '%s\n' "${relay_output}" | tail -n 1 | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
+            if [[ -z "${detail}" ]]; then
+              detail="Public acquisition relay exited with status ${relay_status}."
+            fi
+            echo "::error title=Opaque public acquisition failed closed::${detail}"
+            exit "${relay_status}"
+          fi
