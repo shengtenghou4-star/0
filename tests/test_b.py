@@ -2,7 +2,7 @@ import json
 import unittest
 from pathlib import Path
 
-from scripts import public_fetch_runner, public_fetch_worker
+from scripts import b, b_worker
 
 
 CAPSULE = "a" * 32
@@ -32,28 +32,28 @@ def good_manifest():
 class PublicFetchContractTests(unittest.TestCase):
     def test_manifest_accepts_frozen_schema(self):
         manifest = good_manifest()
-        self.assertEqual(public_fetch_runner.validate_manifest(manifest, CAPSULE), manifest)
+        self.assertEqual(b.validate_manifest(manifest, CAPSULE), manifest)
 
     def test_manifest_rejects_private_or_unlisted_url(self):
         manifest = good_manifest()
         manifest["files"][0]["urls"] = ["https://127.0.0.1/private"]
-        with self.assertRaises(public_fetch_runner.RelayError):
-            public_fetch_runner.validate_manifest(manifest, CAPSULE)
+        with self.assertRaises(b.RelayError):
+            b.validate_manifest(manifest, CAPSULE)
 
     def test_manifest_rejects_path_output(self):
         manifest = good_manifest()
         manifest["files"][0]["name"] = "../escape"
-        with self.assertRaises(public_fetch_runner.RelayError):
-            public_fetch_runner.validate_manifest(manifest, CAPSULE)
+        with self.assertRaises(b.RelayError):
+            b.validate_manifest(manifest, CAPSULE)
 
     def test_manifest_rejects_extra_command(self):
         manifest = good_manifest()
         manifest["command"] = "curl unsafe"
-        with self.assertRaises(public_fetch_runner.RelayError):
-            public_fetch_runner.validate_manifest(manifest, CAPSULE)
+        with self.assertRaises(b.RelayError):
+            b.validate_manifest(manifest, CAPSULE)
 
     def test_container_is_networked_but_secretless_and_hardened(self):
-        command = public_fetch_runner.build_container_command(
+        command = b.build_container_command(
             Path("/tmp/manifest"),
             Path("/tmp/worker"),
             Path("/tmp/result"),
@@ -66,7 +66,7 @@ class PublicFetchContractTests(unittest.TestCase):
             "--cap-drop\nALL",
             "--security-opt\nno-new-privileges",
             "/request/manifest.json,readonly",
-            "/worker/public_fetch_worker.py,readonly",
+            "/worker/b_worker.py,readonly",
         ):
             self.assertIn(required, joined)
         for forbidden in (
@@ -79,7 +79,7 @@ class PublicFetchContractTests(unittest.TestCase):
 
     def test_split_bytes_is_stable_and_complete(self):
         data = b"abcdefghij"
-        chunks = public_fetch_runner.split_bytes(data, 4)
+        chunks = b.split_bytes(data, 4)
         self.assertEqual(chunks, [b"abcd", b"efgh", b"ij"])
         self.assertEqual(b"".join(chunks), data)
 
@@ -96,14 +96,14 @@ class PublicFetchContractTests(unittest.TestCase):
                 "error": "HTTP 403: Forbidden",
             }
         ]
-        value = json.loads(public_fetch_worker.format_failure("archive.rar", attempts))
+        value = json.loads(b_worker.format_failure("archive.rar", attempts))
         self.assertEqual(value["output"], "archive.rar")
         self.assertEqual(value["attempts"], attempts)
 
     def test_rejected_redirect_detail_names_exact_target_privately(self):
         target = "https://blocked.example/download"
-        with self.assertRaises(public_fetch_worker.FetchError) as captured:
-            public_fetch_worker.validate_url(target, {"data.example.org"})
+        with self.assertRaises(b_worker.FetchError) as captured:
+            b_worker.validate_url(target, {"data.example.org"})
         detail = str(captured.exception)
         self.assertIn(target, detail)
         self.assertIn("blocked.example", detail)

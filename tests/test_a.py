@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts import relay_runner
-from scripts.relay_runner import (
+from scripts import a
+from scripts.a import (
     RelayError,
     build_container_command,
     decode_payload_text,
@@ -70,15 +70,15 @@ class ContractTests(unittest.TestCase):
 
     def test_put_file_binds_private_result_branch(self):
         captured = {}
-        original = relay_runner.api_request
+        original = a.api_request
 
         def fake_api_request(url, token, **kwargs):
             captured.update(url=url, token=token, kwargs=kwargs)
             return b"{}"
 
-        relay_runner.api_request = fake_api_request
+        a.api_request = fake_api_request
         try:
-            relay_runner.put_file(
+            a.put_file(
                 "owner/queue",
                 "relay/results/x/file",
                 "results",
@@ -87,7 +87,7 @@ class ContractTests(unittest.TestCase):
                 "receipt",
             )
         finally:
-            relay_runner.api_request = original
+            a.api_request = original
         payload = __import__("json").loads(captured["kwargs"]["data"])
         self.assertEqual(payload["branch"], "results")
         self.assertEqual(payload["content"], "YWJj")

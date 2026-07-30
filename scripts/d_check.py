@@ -177,7 +177,7 @@ def main() -> int:
         "tool_id": tool_id,
         "run_id": run_id,
         "run_attempt": run_attempt,
-        "operation": "fixed_tool_independent_verification",
+        "operation": "matrix_d_independent_verification",
         "receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
         "binary_bytes": len(binary),
         "binary_sha256": expected_sha,

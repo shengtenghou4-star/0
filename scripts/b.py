@@ -248,12 +248,12 @@ def build_container_command(
         "--mount",
         f"type=bind,src={manifest_path},dst=/request/manifest.json,readonly",
         "--mount",
-        f"type=bind,src={worker_path},dst=/worker/public_fetch_worker.py,readonly",
+        f"type=bind,src={worker_path},dst=/worker/b_worker.py,readonly",
         "--mount",
         f"type=bind,src={result_root},dst=/result",
         CONTAINER_IMAGE,
         "python",
-        "/worker/public_fetch_worker.py",
+        "/worker/b_worker.py",
         "/request/manifest.json",
         "/result/output",
     ]
@@ -319,7 +319,7 @@ def main() -> int:
 
     request_path = f"relay/public-fetch/{capsule_id}/manifest.json"
     manifest = fetch_manifest(repository, request_path, ref, token, capsule_id)
-    worker_path = Path(__file__).with_name("public_fetch_worker.py").resolve()
+    worker_path = Path(__file__).with_name("b_worker.py").resolve()
     if not worker_path.is_file():
         raise RelayError("public fetch worker is missing")
 

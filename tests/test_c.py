@@ -8,7 +8,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
-    "index_public_fetch_result", ROOT / "scripts" / "index_public_fetch_result.py"
+    "c", ROOT / "scripts" / "c.py"
 )
 assert SPEC and SPEC.loader
 indexer = importlib.util.module_from_spec(SPEC)

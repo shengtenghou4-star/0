@@ -2,7 +2,7 @@ import io
 import tarfile
 import unittest
 
-from scripts import verify_public_fetch_result as verifier
+from scripts import b_check as verifier
 
 
 class PublicFetchVerifierTests(unittest.TestCase):
