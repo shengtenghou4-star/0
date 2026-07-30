@@ -96,3 +96,27 @@ jobs:
             echo "::error title=Opaque public acquisition failed closed::${detail}"
             exit "${relay_status}"
           fi
+
+      - name: Independently verify private result package
+        shell: bash
+        env:
+          RELAY_CAPSULE_ID: ${{ steps.capsule.outputs.capsule_id }}
+          LAB_QUEUE_REPOSITORY: shengtenghou4-star/00
+          LAB_QUEUE_REF: main
+          LAB_QUEUE_WRITE_BRANCH: results
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          RELAY_RUN_ID: ${{ github.run_id }}
+          RELAY_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set +e
+          verify_output="$(python scripts/verify_public_fetch_result.py 2>&1)"
+          verify_status=$?
+          printf '%s\n' "${verify_output}"
+          if [[ ${verify_status} -ne 0 ]]; then
+            detail="$(printf '%s\n' "${verify_output}" | tail -n 1 | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
+            if [[ -z "${detail}" ]]; then
+              detail="Private package verification exited with status ${verify_status}."
+            fi
+            echo "::error title=Independent private verification failed closed::${detail}"
+            exit "${verify_status}"
+          fi
