@@ -100,6 +100,15 @@ class PublicFetchContractTests(unittest.TestCase):
         self.assertEqual(value["output"], "archive.rar")
         self.assertEqual(value["attempts"], attempts)
 
+    def test_rejected_redirect_detail_names_exact_target_privately(self):
+        target = "https://blocked.example/download"
+        with self.assertRaises(public_fetch_worker.FetchError) as captured:
+            public_fetch_worker.validate_url(target, {"data.example.org"})
+        detail = str(captured.exception)
+        self.assertIn(target, detail)
+        self.assertIn("blocked.example", detail)
+        self.assertIn("data.example.org", detail)
+
 
 if __name__ == "__main__":
     unittest.main()
