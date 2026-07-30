@@ -1,0 +1,26 @@
+name: Branch cleanup
+
+on:
+  push:
+    paths:
+      - '.github/workflows/branch_cleanup.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Prepare repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Remove completed case branches
+        run: |
+          set -euo pipefail
+          git push origin --delete case/002 || true
+          git push origin --delete diag/fixed-tool-5f4a2b8c || true
