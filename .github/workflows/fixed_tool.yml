@@ -1,5 +1,6 @@
 name: Opaque fixed tool build
 
+# Verified private output is indexed through a stable latest.json pointer.
 on:
   workflow_dispatch:
   push:
