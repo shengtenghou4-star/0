@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed runner for an opaque capsule stored in a private GitHub queue."""
+"""Fail-closed runner for an opaque capsule stored in a dedicated private queue."""
 
 from __future__ import annotations
 
@@ -21,10 +21,12 @@ from pathlib import Path
 from typing import Any
 
 CAPSULE_RE = re.compile(r"^[0-9a-f]{32}$")
+RUN_NUMBER_RE = re.compile(r"^[0-9]+$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_PAYLOAD_BYTES = 75 * 1024 * 1024
 MAX_RESULT_BYTES = 90 * 1024 * 1024
 API_ROOT = "https://api.github.com"
+CONTAINER_IMAGE = "python:3.12-bookworm"
 
 
 class RelayError(RuntimeError):
@@ -38,7 +40,20 @@ def required_env(name: str) -> str:
     return value
 
 
-def api_request(url: str, token: str, *, method: str = "GET", data: bytes | None = None, accept: str = "application/vnd.github+json") -> bytes:
+def validate_run_number(name: str, value: str) -> str:
+    if not RUN_NUMBER_RE.fullmatch(value):
+        raise RelayError(f"{name} must contain decimal digits only")
+    return value
+
+
+def api_request(
+    url: str,
+    token: str,
+    *,
+    method: str = "GET",
+    data: bytes | None = None,
+    accept: str = "application/vnd.github+json",
+) -> bytes:
     request = urllib.request.Request(url, method=method, data=data)
     request.add_header("Authorization", f"Bearer {token}")
     request.add_header("Accept", accept)
@@ -92,11 +107,11 @@ def decode_payload_text(encoded: bytes) -> bytes:
     try:
         compact = b"".join(encoded.split())
         payload = base64.b64decode(compact, validate=True)
-        if len(payload) > MAX_PAYLOAD_BYTES:
-            raise RelayError("payload exceeds the 75 MiB request limit")
-        return payload
     except ValueError:
         raise RelayError("payload wrapper is not valid base64") from None
+    if len(payload) > MAX_PAYLOAD_BYTES:
+        raise RelayError("payload exceeds the 75 MiB request limit")
+    return payload
 
 
 def validate_manifest(manifest: dict[str, Any], capsule_id: str) -> dict[str, Any]:
@@ -134,11 +149,60 @@ def safe_extract(archive_bytes: bytes, destination: Path) -> None:
     entrypoint.chmod(0o700)
 
 
-def child_environment(capsule_id: str) -> dict[str, str]:
-    keep = ("PATH", "HOME", "LANG", "LC_ALL", "TZ")
-    env = {name: os.environ[name] for name in keep if name in os.environ}
-    env.update({"CI": "true", "CAPSULE_ID": capsule_id})
-    return env
+def build_container_command(
+    payload_root: Path,
+    result_root: Path,
+    capsule_id: str,
+    container_name: str,
+) -> list[str]:
+    uid = os.getuid()
+    gid = os.getgid()
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--name",
+        container_name,
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "512",
+        "--memory",
+        "6g",
+        "--cpus",
+        "2",
+        "--user",
+        f"{uid}:{gid}",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,size=512m",
+        "--mount",
+        f"type=bind,src={payload_root},dst=/capsule,readonly",
+        "--mount",
+        f"type=bind,src={result_root},dst=/result",
+        "--workdir",
+        "/capsule",
+        "--env",
+        f"CAPSULE_ID={capsule_id}",
+        CONTAINER_IMAGE,
+        "/bin/bash",
+        "/capsule/run.sh",
+        "/result/output",
+    ]
+
+
+def stop_container(container_name: str) -> None:
+    subprocess.run(
+        ["docker", "rm", "-f", container_name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+        check=False,
+    )
 
 
 def pack_results(result_root: Path) -> bytes:
@@ -154,12 +218,22 @@ def pack_results(result_root: Path) -> bytes:
     return data
 
 
-def put_file(repository: str, path: str, branch: str, token: str, content: bytes, message: str) -> None:
-    payload = json.dumps({
-        "message": message,
-        "content": base64.b64encode(content).decode("ascii"),
-        "branch": branch,
-    }, separators=(",", ":")).encode("utf-8")
+def put_file(
+    repository: str,
+    path: str,
+    branch: str,
+    token: str,
+    content: bytes,
+    message: str,
+) -> None:
+    payload = json.dumps(
+        {
+            "message": message,
+            "content": base64.b64encode(content).decode("ascii"),
+            "branch": branch,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
     api_request(contents_url(repository, path), token, method="PUT", data=payload)
 
 
@@ -170,18 +244,21 @@ def main() -> int:
 
     repository = required_env("LAB_QUEUE_REPOSITORY")
     ref = required_env("LAB_QUEUE_REF")
-    read_token = required_env("LAB_QUEUE_READ_TOKEN")
     write_branch = required_env("LAB_QUEUE_WRITE_BRANCH")
-    write_token = required_env("LAB_QUEUE_WRITE_TOKEN")
-    run_id = required_env("RELAY_RUN_ID")
-    run_attempt = required_env("RELAY_RUN_ATTEMPT")
+    token = required_env("LAB_QUEUE_TOKEN")
+    run_id = validate_run_number("RELAY_RUN_ID", required_env("RELAY_RUN_ID"))
+    run_attempt = validate_run_number(
+        "RELAY_RUN_ATTEMPT", required_env("RELAY_RUN_ATTEMPT")
+    )
 
     request_root = f"relay/requests/{capsule_id}"
     manifest = validate_manifest(
-        fetch_json(repository, f"{request_root}/manifest.json", ref, read_token),
+        fetch_json(repository, f"{request_root}/manifest.json", ref, token),
         capsule_id,
     )
-    payload_text = fetch_contents_bytes(repository, f"{request_root}/payload.tar.gz.b64", ref, read_token)
+    payload_text = fetch_contents_bytes(
+        repository, f"{request_root}/payload.tar.gz.b64", ref, token
+    )
     payload = decode_payload_text(payload_text)
     if hashlib.sha256(payload).hexdigest() != manifest["payload_sha256"]:
         raise RelayError("payload SHA-256 mismatch")
@@ -194,6 +271,7 @@ def main() -> int:
         result_root.mkdir()
         safe_extract(payload, payload_root)
 
+        container_name = f"opaque-relay-{run_id}-{run_attempt}"
         started = int(time.time())
         stdout_path = result_root / "stdout.txt"
         stderr_path = result_root / "stderr.txt"
@@ -202,9 +280,9 @@ def main() -> int:
         with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
             try:
                 completed = subprocess.run(
-                    ["/bin/bash", "run.sh", str(result_root / "output")],
-                    cwd=payload_root,
-                    env=child_environment(capsule_id),
+                    build_container_command(
+                        payload_root, result_root, capsule_id, container_name
+                    ),
                     stdout=stdout_file,
                     stderr=stderr_file,
                     timeout=manifest["timeout_minutes"] * 60,
@@ -213,6 +291,7 @@ def main() -> int:
                 return_code = completed.returncode
             except subprocess.TimeoutExpired:
                 timed_out = True
+                stop_container(container_name)
 
         finished = int(time.time())
         receipt = {
@@ -221,6 +300,8 @@ def main() -> int:
             "run_id": run_id,
             "run_attempt": run_attempt,
             "payload_sha256": manifest["payload_sha256"],
+            "container_image": CONTAINER_IMAGE,
+            "network": "none",
             "return_code": return_code,
             "timed_out": timed_out,
             "started_unix": started,
@@ -231,13 +312,28 @@ def main() -> int:
             encoding="utf-8",
         )
         package = pack_results(result_root)
-        package_sha256 = hashlib.sha256(package).hexdigest()
-        receipt["result_sha256"] = package_sha256
-        receipt_bytes = (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode("utf-8")
+        receipt["result_sha256"] = hashlib.sha256(package).hexdigest()
+        receipt_bytes = (
+            json.dumps(receipt, sort_keys=True, indent=2) + "\n"
+        ).encode("utf-8")
 
         result_prefix = f"relay/results/{capsule_id}/{run_id}-{run_attempt}"
-        put_file(repository, f"{result_prefix}/result.tar.gz", write_branch, write_token, package, "Store opaque relay result")
-        put_file(repository, f"{result_prefix}/receipt.json", write_branch, write_token, receipt_bytes, "Store opaque relay receipt")
+        put_file(
+            repository,
+            f"{result_prefix}/result.tar.gz",
+            write_branch,
+            token,
+            package,
+            "Store opaque relay result",
+        )
+        put_file(
+            repository,
+            f"{result_prefix}/receipt.json",
+            write_branch,
+            token,
+            receipt_bytes,
+            "Store opaque relay receipt",
+        )
 
     print("Opaque capsule completed; private result receipt stored.")
     return 0 if return_code == 0 and not timed_out else 1
