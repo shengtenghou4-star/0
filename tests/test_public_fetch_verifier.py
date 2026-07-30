@@ -57,6 +57,23 @@ class PublicFetchVerifierTests(unittest.TestCase):
         with self.assertRaises(verifier.VerificationError):
             verifier.validate_manifest(manifest, "a" * 32)
 
+    def test_large_contents_use_raw_media_type(self):
+        captured = {}
+        original = verifier.api_request
+
+        def fake_api_request(url, token, **kwargs):
+            captured.update(url=url, token=token, kwargs=kwargs)
+            return b"raw-bytes"
+
+        verifier.api_request = fake_api_request
+        try:
+            value = verifier.fetch_contents_bytes("owner/repo", "path/file.bin", "results", "token")
+        finally:
+            verifier.api_request = original
+        self.assertEqual(value, b"raw-bytes")
+        self.assertEqual(captured["kwargs"]["accept"], "application/vnd.github.raw+json")
+        self.assertIn("ref=results", captured["url"])
+
 
 if __name__ == "__main__":
     unittest.main()
