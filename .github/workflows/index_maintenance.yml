@@ -4,12 +4,16 @@ on:
   push:
     paths:
       - '.github/workflows/index_maintenance.yml'
+  pull_request:
+    paths:
+      - 'maintenance/*.txt'
 
 permissions:
   contents: write
 
 jobs:
   refresh:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -53,6 +57,7 @@ jobs:
                   os.replace(source, target)
 
           shutil.rmtree('relay-triggers', ignore_errors=True)
+          shutil.rmtree('maintenance', ignore_errors=True)
           Path('.github/workflows/index_maintenance.yml').unlink()
 
           replacements = [
@@ -102,6 +107,7 @@ jobs:
           python -m unittest discover -s tests -v
           test ! -e .github/workflows/index_maintenance.yml
           test ! -e relay-triggers
+          test ! -e maintenance
           test -e .github/workflows/a.yml
           test -e .github/workflows/b.yml
           test -e .github/workflows/c.yml
