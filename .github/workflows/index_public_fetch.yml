@@ -1,0 +1,91 @@
+name: Opaque result index
+
+on:
+  workflow_dispatch:
+    inputs:
+      capsule_id:
+        description: Opaque 32-character public-fetch capsule identifier
+        required: true
+        type: string
+  push:
+    paths:
+      - 'relay-triggers/public-fetch-index/*.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opaque-result-index-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out fixed indexer
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Verify indexer contract
+        run: python -m unittest discover -s tests -v
+
+      - name: Resolve opaque capsule
+        id: capsule
+        shell: bash
+        env:
+          DISPATCH_CAPSULE: ${{ inputs.capsule_id }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            capsule="${DISPATCH_CAPSULE}"
+          else
+            mapfile -t trigger_files < <(
+              git diff-tree --no-commit-id --name-only -r "${GITHUB_SHA}" \
+                | grep -E '^relay-triggers/public-fetch-index/[0-9a-f]{32}\.txt$'
+            )
+            if [[ "${#trigger_files[@]}" -ne 1 ]]; then
+              echo "::error title=Opaque index trigger invalid::Expected exactly one result-index trigger file."
+              exit 2
+            fi
+            capsule="$(tr -d '\r\n' < "${trigger_files[0]}")"
+          fi
+          if [[ ! "${capsule}" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::error title=Opaque capsule invalid::Capsule ID must be 32 lowercase hexadecimal characters."
+            exit 2
+          fi
+          echo "capsule_id=${capsule}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate queue credential
+        shell: bash
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        run: |
+          if [[ -z "${LAB_QUEUE_TOKEN}" ]]; then
+            echo "::error title=Relay credential missing::LAB_QUEUE_TOKEN is missing or empty."
+            exit 2
+          fi
+
+      - name: Index private result
+        shell: bash
+        env:
+          RELAY_CAPSULE_ID: ${{ steps.capsule.outputs.capsule_id }}
+          LAB_QUEUE_REPOSITORY: shengtenghou4-star/00
+          LAB_QUEUE_RESULTS_REF: results
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        run: |
+          set +e
+          index_output="$(python scripts/index_public_fetch_result.py 2>&1)"
+          index_status=$?
+          if [[ ${index_status} -ne 0 ]]; then
+            echo "::error title=Opaque result indexing failed closed::Private result was not indexed."
+            exit "${index_status}"
+          fi
+          printf '%s\n' "Opaque private result index updated."
