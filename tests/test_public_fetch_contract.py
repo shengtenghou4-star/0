@@ -1,7 +1,8 @@
+import json
 import unittest
 from pathlib import Path
 
-from scripts import public_fetch_runner
+from scripts import public_fetch_runner, public_fetch_worker
 
 
 CAPSULE = "a" * 32
@@ -81,6 +82,23 @@ class PublicFetchContractTests(unittest.TestCase):
         chunks = public_fetch_runner.split_bytes(data, 4)
         self.assertEqual(chunks, [b"abcd", b"efgh", b"ij"])
         self.assertEqual(b"".join(chunks), data)
+
+    def test_private_failure_diagnostics_are_machine_readable(self):
+        attempts = [
+            {
+                "attempt": 1,
+                "url": "https://data.example.org/a",
+                "final_url": "https://data.example.org/b",
+                "status": 403,
+                "bytes": 0,
+                "ok": False,
+                "error_type": "http",
+                "error": "HTTP 403: Forbidden",
+            }
+        ]
+        value = json.loads(public_fetch_worker.format_failure("archive.rar", attempts))
+        self.assertEqual(value["output"], "archive.rar")
+        self.assertEqual(value["attempts"], attempts)
 
 
 if __name__ == "__main__":
