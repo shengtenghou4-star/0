@@ -8,9 +8,13 @@ The queue credential must be a fine-grained token scoped only to `shengtenghou4-
 
 Checkout credential persistence is disabled. The queue token is used only by the host orchestrator to read requests and return private results.
 
-## Prohibited public data
+## Public information boundary
 
-Public inputs, workflow names, branch names, pull requests, commit messages, logs, trigger files, and README files must not contain project names, private repository numbers other than the neutral queue `00`, scientific terms, candidate identifiers, experiment names, result summaries, research progress, source URLs, or destination paths.
+Public inputs, workflow and branch names, pull requests, commit messages, logs, trigger files, and documentation must not disclose private project names, private repository numbers other than the neutral queue `00`, private data, candidate identifiers, unpublished experiment names, research results or progress, credentials, private destination paths, or any mapping from an opaque task to a private project.
+
+A fixed audited workflow may identify a generic public dependency, an immutable public-source commit, or a public dataset/provider/DOI when that identity is required for reproducibility. These public identities must not be coupled to a private repository, private project, candidate, result, or progress claim. Dynamic source URLs, exact acquisition allowlists, private task manifests, and project-to-task mappings remain private.
+
+Historical migration and diagnostic commits may name a public dependency or public dataset source. They are operational receipts only and are not research authority or evidence of a private project mapping.
 
 ## Offline capsule contract
 
