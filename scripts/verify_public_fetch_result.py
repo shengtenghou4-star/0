@@ -53,10 +53,11 @@ def api_request(
     *,
     method: str = "GET",
     data: bytes | None = None,
+    accept: str = "application/vnd.github+json",
 ) -> bytes:
     request = urllib.request.Request(url, method=method, data=data)
     request.add_header("Authorization", f"Bearer {token}")
-    request.add_header("Accept", "application/vnd.github+json")
+    request.add_header("Accept", accept)
     request.add_header("X-GitHub-Api-Version", "2022-11-28")
     request.add_header("User-Agent", "opaque-public-fetch-verifier")
     if data is not None:
@@ -79,17 +80,11 @@ def contents_url(repository: str, path: str, ref: str | None = None) -> str:
 
 
 def fetch_contents_bytes(repository: str, path: str, ref: str, token: str) -> bytes:
-    raw = api_request(contents_url(repository, path, ref), token)
-    try:
-        envelope = json.loads(raw)
-    except json.JSONDecodeError:
-        raise VerificationError("private queue response is not valid JSON") from None
-    if envelope.get("type") != "file" or envelope.get("encoding") != "base64":
-        raise VerificationError("private queue response is not a base64 file")
-    try:
-        return base64.b64decode(b"".join(str(envelope["content"]).encode().split()), validate=True)
-    except (KeyError, ValueError):
-        raise VerificationError("private queue file envelope is malformed") from None
+    return api_request(
+        contents_url(repository, path, ref),
+        token,
+        accept="application/vnd.github.raw+json",
+    )
 
 
 def fetch_json(repository: str, path: str, ref: str, token: str) -> tuple[dict[str, Any], bytes]:
