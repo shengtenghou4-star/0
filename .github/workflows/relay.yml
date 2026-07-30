@@ -1,0 +1,44 @@
+name: Opaque task relay
+
+on:
+  workflow_dispatch:
+    inputs:
+      capsule_id:
+        description: Opaque 32-character capsule identifier
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opaque-relay-${{ inputs.capsule_id }}
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Check out fixed launcher
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify launcher contract
+        run: python -m unittest discover -s tests -v
+
+      - name: Execute opaque capsule
+        env:
+          RELAY_CAPSULE_ID: ${{ inputs.capsule_id }}
+          LAB_QUEUE_REPOSITORY: ${{ secrets.LAB_QUEUE_REPOSITORY }}
+          LAB_QUEUE_REF: ${{ secrets.LAB_QUEUE_REF }}
+          LAB_QUEUE_READ_TOKEN: ${{ secrets.LAB_QUEUE_READ_TOKEN }}
+          LAB_QUEUE_WRITE_BRANCH: ${{ secrets.LAB_QUEUE_WRITE_BRANCH }}
+          LAB_QUEUE_WRITE_TOKEN: ${{ secrets.LAB_QUEUE_WRITE_TOKEN }}
+          RELAY_RUN_ID: ${{ github.run_id }}
+          RELAY_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: python scripts/relay_runner.py
