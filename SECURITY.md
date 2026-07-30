@@ -2,15 +2,17 @@
 
 ## Trust boundaries
 
-The public repository is trusted only as a fixed launcher. The dedicated private queue is the authority for capsule payloads and integrity metadata.
+The public repository is trusted only as a fixed launcher. The dedicated private queue is the authority for capsule payloads, public-fetch manifests, and integrity metadata.
 
 The queue credential must be a fine-grained token scoped only to `shengtenghou4-star/00`, with repository Contents read and write permission and no other repository selected.
 
+Checkout credential persistence is disabled. The queue token is used only by the host orchestrator to read requests and return private results.
+
 ## Prohibited public data
 
-Public inputs, workflow names, branch names, pull requests, commit messages, logs, and README files must not contain project names, private repository numbers other than the neutral queue `00`, scientific terms, candidate identifiers, experiment names, result summaries, or research progress.
+Public inputs, workflow names, branch names, pull requests, commit messages, logs, trigger files, and README files must not contain project names, private repository numbers other than the neutral queue `00`, scientific terms, candidate identifiers, experiment names, result summaries, research progress, source URLs, or destination paths.
 
-## Capsule contract
+## Offline capsule contract
 
 The queue stores:
 
@@ -20,9 +22,7 @@ The queue stores:
 
 The payload file is Base64 text wrapping a gzip tar archive. The manifest is fail-closed. The payload must contain a root-level executable `run.sh`. Archive links, devices, absolute paths, and parent traversal are rejected. The payload SHA-256 must match the manifest.
 
-## Execution containment
-
-Capsule code runs in a separate Docker PID and mount namespace. The container:
+Offline capsule code runs in a separate Docker PID and mount namespace. The container:
 
 - receives no queue token, repository name, ref, branch, or GitHub environment;
 - has no network;
@@ -32,6 +32,39 @@ Capsule code runs in a separate Docker PID and mount namespace. The container:
 - mounts the capsule read-only and only the result directory writable;
 - does not receive the host workspace or Docker socket.
 
-The host launcher captures capsule output without streaming it to public logs and returns a compressed result package to the private queue after the container exits.
+## Public HTTPS acquisition contract
 
-Capsules must still be authored or reviewed by the laboratory. This design is not intended to execute adversarial code capable of exploiting the container runtime or host kernel.
+The queue stores:
+
+`relay/public-fetch/<capsule_id>/manifest.json`
+
+The strict manifest may contain only:
+
+- the matching opaque capsule ID;
+- the frozen `public_https_fetch` operation;
+- a timeout and global byte cap;
+- exact lowercase HTTPS host allowlists;
+- an optional landing URL;
+- one to eight safe output names, candidate HTTPS URLs, byte bounds, and optional magic bytes.
+
+No shell command, repository name, token, executable payload, public path, or arbitrary environment value is accepted.
+
+The acquisition worker runs in a separate networked Docker container. The container:
+
+- receives no queue token, private repository name, ref, branch, or GitHub environment;
+- receives no arbitrary executable capsule;
+- validates every initial and redirected URL against the exact HTTPS host allowlist;
+- rejects hosts resolving to non-global IP addresses at validation time;
+- has a read-only root filesystem;
+- has all Linux capabilities dropped;
+- uses `no-new-privileges`;
+- mounts only the validated manifest and fixed public worker read-only, with a result directory writable;
+- does not receive the host workspace or Docker socket.
+
+Downloads are bounded by per-file and global byte limits and may be required to match frozen magic bytes. The result package is split into bounded private chunks and returned to the private queue.
+
+## Output handling
+
+Both orchestrators capture worker stdout and stderr without streaming private details to public logs. Public logs receive only generic success or fail-closed annotations. Result packages and receipts are returned only to the private queue.
+
+Offline capsules must be authored or reviewed by the laboratory. Public acquisition manifests must also be reviewed. The design does not claim resistance to DNS infrastructure compromise, container-runtime escape, or host-kernel escape.
