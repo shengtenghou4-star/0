@@ -1,6 +1,5 @@
-name: Opaque fixed tool build
+name: Matrix D
 
-# Verified private output is indexed through a stable latest.json pointer.
 on:
   workflow_dispatch:
   push:
@@ -14,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: opaque-fixed-tool
+  group: matrix-d
   cancel-in-progress: false
 
 jobs:
@@ -23,20 +22,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Check out fixed launcher
+      - name: Prepare workspace
         uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      - name: Set up Python
+      - name: Configure runtime
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
-      - name: Verify launcher contracts
+      - name: Validate fixtures
         run: python -m unittest discover -s tests -v
 
-      - name: Fetch pinned public source
+      - name: Prepare fixed input
         shell: bash
         env:
           SOURCE_COMMIT: ec9d6942110fa66926ffeea658c6191f9fe2b873
@@ -57,7 +56,7 @@ jobs:
           #endif
           EOF
 
-      - name: Build in isolated container
+      - name: Run fixed transformation
         shell: bash
         run: |
           set -euo pipefail
@@ -78,17 +77,17 @@ jobs:
             gcc:14-bookworm \
             /bin/bash -lc 'gcc -O3 -DNDEBUG -DNALLSIGNALS -DNGETRUSAGE picosat.c version.c app.c main.c -o /out/binary && /out/binary --version > /out/version.txt'
 
-      - name: Validate queue credential
+      - name: Check access
         shell: bash
         env:
           LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
         run: |
           if [[ -z "${LAB_QUEUE_TOKEN}" ]]; then
-            echo "::error title=Relay credential missing::LAB_QUEUE_TOKEN is missing or empty."
+            echo "::error title=Access check failed::Required runtime key is missing."
             exit 2
           fi
 
-      - name: Store private fixed-tool result
+      - name: Store case output
         env:
           FIXED_TOOL_ID: c20fb67ce57be5d5f909563f7a7fa260
           FIXED_TOOL_SOURCE_COMMIT: ec9d6942110fa66926ffeea658c6191f9fe2b873
@@ -100,7 +99,7 @@ jobs:
           RELAY_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: python scripts/store_fixed_tool.py output/binary output/version.txt
 
-      - name: Independently verify private fixed-tool result
+      - name: Verify case output
         env:
           FIXED_TOOL_ID: c20fb67ce57be5d5f909563f7a7fa260
           LAB_QUEUE_REPOSITORY: shengtenghou4-star/00
