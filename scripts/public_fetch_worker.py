@@ -47,7 +47,20 @@ def validate_url(value: str, allowed_hosts: set[str]) -> str:
         or host not in allowed_hosts
         or parsed.fragment
     ):
-        raise FetchError("download URL violates the HTTPS host contract")
+        detail = json.dumps(
+            {
+                "url": value,
+                "scheme": parsed.scheme,
+                "host": host,
+                "port": parsed.port,
+                "has_userinfo": parsed.username is not None or parsed.password is not None,
+                "has_fragment": bool(parsed.fragment),
+                "allowed_hosts": sorted(allowed_hosts),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        raise FetchError(f"download URL violates the HTTPS host contract: {detail}")
     validate_host_addresses(host)
     return value
 
