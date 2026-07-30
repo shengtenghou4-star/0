@@ -94,8 +94,19 @@ def fetch_landing(
             if getattr(response, "status", 200) >= 400:
                 raise FetchError("landing request failed")
             response.read(2 * 1024 * 1024)
+    except urllib.error.HTTPError as exc:
+        raise FetchError(f"landing request failed with HTTP {exc.code}") from None
     except (urllib.error.URLError, TimeoutError):
         raise FetchError("landing request failed") from None
+
+
+def format_failure(output_name: str, attempts: list[dict[str, Any]]) -> str:
+    """Serialize detailed diagnostics for the private result package only."""
+    return json.dumps(
+        {"output": output_name, "attempts": attempts},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def download_one(
@@ -105,7 +116,7 @@ def download_one(
     allowed_hosts: set[str],
     referer: str | None,
 ) -> dict[str, Any]:
-    attempts = []
+    attempts: list[dict[str, Any]] = []
     magic = bytes.fromhex(entry["magic_hex"])
     for ordinal, url in enumerate(entry["urls"], start=1):
         validate_url(url, allowed_hosts)
@@ -140,31 +151,58 @@ def download_one(
                     raise FetchError("candidate failed the frozen magic-byte gate")
             final_path = output_root / entry["name"]
             os.replace(temp_path, final_path)
-            row = {
+            attempts.append(
+                {
+                    "attempt": ordinal,
+                    "url": url,
+                    "final_url": final_url,
+                    "status": status,
+                    "bytes": size,
+                    "ok": True,
+                }
+            )
+            return {
                 "name": entry["name"],
                 "bytes": size,
                 "sha256": digest.hexdigest(),
                 "selected_url": final_url,
                 "attempt": ordinal,
+                "attempts": attempts,
             }
-            attempts.append({"attempt": ordinal, "status": status, "bytes": size, "ok": True})
-            row["attempts"] = attempts
-            return row
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            final_url = exc.geturl()
+            attempts.append(
+                {
+                    "attempt": ordinal,
+                    "url": url,
+                    "final_url": final_url,
+                    "status": status,
+                    "bytes": size,
+                    "ok": False,
+                    "error_type": "http",
+                    "error": f"HTTP {exc.code}: {exc.reason}",
+                }
+            )
         except (urllib.error.URLError, TimeoutError, FetchError, OSError) as exc:
             attempts.append(
                 {
                     "attempt": ordinal,
+                    "url": url,
+                    "final_url": final_url,
                     "status": status,
                     "bytes": size,
                     "ok": False,
+                    "error_type": type(exc).__name__,
                     "error": str(exc),
                 }
             )
+        finally:
             try:
                 temp_path.unlink()
             except FileNotFoundError:
                 pass
-    raise FetchError(f"all candidates failed for output {entry['name']}")
+    raise FetchError(format_failure(entry["name"], attempts))
 
 
 def main() -> int:
