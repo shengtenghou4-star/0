@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,6 +42,29 @@ class FixedToolContractTests(unittest.TestCase):
             verify_fixed_tool.api_request = original
         self.assertEqual(value, b"\x7fELFbinary")
         self.assertEqual(captured["kwargs"]["accept"], "application/vnd.github.raw+json")
+
+    def test_latest_pointer_is_private_and_run_bound(self):
+        certificate = {
+            "schema": 1,
+            "tool_id": "c" * 32,
+            "run_id": "123",
+            "run_attempt": "1",
+            "operation": "fixed_tool_independent_verification",
+            "receipt_sha256": "a" * 64,
+            "binary_bytes": 10004,
+            "binary_sha256": "b" * 64,
+            "elf_magic": "7f454c46",
+            "source_commit": "d" * 40,
+            "version": "965.1",
+            "verdict": "VERIFIED",
+        }
+        prefix = f"relay/fixed-tools/{certificate['tool_id']}/123-1"
+        latest = verify_fixed_tool.build_latest(certificate, prefix)
+        self.assertEqual(latest["result_prefix"], prefix)
+        self.assertEqual(latest["verification_path"], f"{prefix}/verification.json")
+        serialized = json.dumps(latest)
+        for forbidden in ("http://", "https://", "picosat", "PercoGuard", "Lazarus"):
+            self.assertNotIn(forbidden, serialized)
 
 
 if __name__ == "__main__":
