@@ -1,0 +1,106 @@
+name: Opaque fixed tool build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/fixed_tool.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opaque-fixed-tool
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out fixed launcher
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Verify launcher contracts
+        run: python -m unittest discover -s tests -v
+
+      - name: Fetch pinned public source
+        shell: bash
+        env:
+          SOURCE_COMMIT: ec9d6942110fa66926ffeea658c6191f9fe2b873
+        run: |
+          set -euo pipefail
+          mkdir source
+          git -C source init
+          git -C source remote add origin https://github.com/SpacialCircumstances/picosat.git
+          git -C source fetch --depth 1 origin "${SOURCE_COMMIT}"
+          git -C source checkout --detach FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = "${SOURCE_COMMIT}"
+          cat > source/config.h <<'EOF'
+          #ifndef PICOSAT_CONFIG_H
+          #define PICOSAT_CONFIG_H
+          #define PICOSAT_VERSION "965.1"
+          #define PICOSAT_CC "GNU"
+          #define PICOSAT_CFLAGS "-O3 -DNDEBUG -DNALLSIGNALS -DNGETRUSAGE"
+          #endif
+          EOF
+
+      - name: Build in isolated container
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir output
+          docker run --rm \
+            --network none \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --pids-limit 512 \
+            --memory 4g \
+            --cpus 2 \
+            --user "$(id -u):$(id -g)" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=512m \
+            --mount "type=bind,src=${PWD}/source,dst=/src,readonly" \
+            --mount "type=bind,src=${PWD}/output,dst=/out" \
+            --workdir /src \
+            gcc:14-bookworm \
+            /bin/bash -lc 'gcc -O3 -DNDEBUG -DNALLSIGNALS -DNGETRUSAGE picosat.c version.c app.c main.c -o /out/binary && /out/binary --version > /out/version.txt'
+
+      - name: Validate queue credential
+        shell: bash
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        run: |
+          if [[ -z "${LAB_QUEUE_TOKEN}" ]]; then
+            echo "::error title=Relay credential missing::LAB_QUEUE_TOKEN is missing or empty."
+            exit 2
+          fi
+
+      - name: Store private fixed-tool result
+        env:
+          FIXED_TOOL_ID: c20fb67ce57be5d5f909563f7a7fa260
+          FIXED_TOOL_SOURCE_COMMIT: ec9d6942110fa66926ffeea658c6191f9fe2b873
+          FIXED_TOOL_BUILD_IMAGE: gcc:14-bookworm
+          LAB_QUEUE_REPOSITORY: shengtenghou4-star/00
+          LAB_QUEUE_WRITE_BRANCH: results
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          RELAY_RUN_ID: ${{ github.run_id }}
+          RELAY_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: python scripts/store_fixed_tool.py output/binary output/version.txt
+
+      - name: Independently verify private fixed-tool result
+        env:
+          FIXED_TOOL_ID: c20fb67ce57be5d5f909563f7a7fa260
+          LAB_QUEUE_REPOSITORY: shengtenghou4-star/00
+          LAB_QUEUE_WRITE_BRANCH: results
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          RELAY_RUN_ID: ${{ github.run_id }}
+          RELAY_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: python scripts/verify_fixed_tool.py
