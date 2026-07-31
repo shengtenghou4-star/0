@@ -1,5 +1,6 @@
 name: Matrix E
 
+# Stable opaque execution lane.
 on:
   workflow_dispatch:
   push:
@@ -101,7 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import base64, hashlib, io, json, os, pathlib, tarfile, time, urllib.parse, urllib.request
+          import base64, hashlib, io, json, os, pathlib, tarfile, time, urllib.request
           token=os.environ['LAB_QUEUE_TOKEN']; cid=os.environ['CAPSULE_ID']; run=os.environ['RUN_ID']; attempt=os.environ['RUN_ATTEMPT']
           repo='shengtenghou4-star/00'; branch='results'; root=pathlib.Path('/tmp/result')
           stream=io.BytesIO()
