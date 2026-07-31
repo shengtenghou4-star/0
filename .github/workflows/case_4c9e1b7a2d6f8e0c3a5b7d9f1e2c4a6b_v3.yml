@@ -1,0 +1,72 @@
+name: case-4c9e1b7a2d6f8e0c3a5b7d9f1e2c4a6b-v3
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/case_4c9e1b7a2d6f8e0c3a5b7d9f1e2c4a6b_v3.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  fixed-case:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Query fixed OAI public-data surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p case_output
+          python - <<'PY'
+          import html, json, pathlib, re, urllib.parse, urllib.request, xml.etree.ElementTree as ET
+          excluded={"1026507","1029071","1191748","1201276","1191045"}
+          headers={"User-Agent":"reference-matrix/1.0","Accept":"application/json"}
+          oai="https://zenodo.org/oai2d"
+          ns={"oai":"http://www.openarchives.org/OAI/2.0/","dc":"http://purl.org/dc/elements/1.1/"}
+          token=None; found={}; pages=0
+          while pages<100 and len(found)<50:
+              params={"verb":"ListRecords","metadataPrefix":"oai_dc","set":"user-open-worm-movement-database"} if token is None else {"verb":"ListRecords","resumptionToken":token}
+              url=oai+"?"+urllib.parse.urlencode(params)
+              with urllib.request.urlopen(urllib.request.Request(url,headers=headers),timeout=180) as response:
+                  root=ET.fromstring(response.read())
+              pages+=1
+              for rec in root.findall(".//oai:record",ns):
+                  descriptions=[n.text or "" for n in rec.findall(".//dc:description",ns)]
+                  identifiers=[n.text or "" for n in rec.findall(".//dc:identifier",ns)]
+                  text="\n".join(descriptions)
+                  if "CGC N2 (Bristol, UK)" not in text or "days_of_adulthood" not in text: continue
+                  rid=None
+                  for ident in identifiers:
+                      m=re.search(r"zenodo\.(\d+)",ident) or re.search(r"zenodo\.org/(?:record|records)/(\d+)",ident)
+                      if m: rid=m.group(1); break
+                  if not rid or rid in excluded or rid in found: continue
+                  day=re.search(r"days_of_adulthood\s*:\s*(\d+)",text,re.I)
+                  base=re.search(r"base_name\s*:\s*([^\n]+)",text,re.I)
+                  fps=re.search(r"frames per second\s*:\s*([0-9.]+)",text,re.I)
+                  found[rid]={"record_id":rid,"days_of_adulthood":int(day.group(1)) if day else None,"base_name":base.group(1).strip() if base else None,"fps":float(fps.group(1)) if fps else None}
+              node=root.find(".//oai:resumptionToken",ns)
+              token=(node.text or "").strip() if node is not None else ""
+              if not token: break
+          candidates=[]
+          for rid,row in found.items():
+              with urllib.request.urlopen(urllib.request.Request(f"https://zenodo.org/api/records/{rid}",headers=headers),timeout=120) as response:
+                  record=json.load(response)
+              metadata=record.get("metadata",{})
+              wcon=[f for f in record.get("files",[]) if f.get("key","").endswith(".wcon.zip")]
+              if len(wcon)!=1 or not wcon[0].get("checksum","").startswith("md5:"): continue
+              f=wcon[0]
+              candidates.append({**row,"title":metadata.get("title"),"doi":metadata.get("doi"),"filename":f.get("key"),"md5":f.get("checksum").split(":",1)[1],"bytes":f.get("size"),"content_url":f.get("links",{}).get("content") or f.get("links",{}).get("self")})
+          candidates.sort(key=lambda r:(r["days_of_adulthood"] is None,r["days_of_adulthood"] or 999,r["record_id"]))
+          result={"schema":"reference-matrix-oai-candidate-discovery-v1","case":"4c9e1b7a2d6f8e0c3a5b7d9f1e2c4a6b","pages_scanned":pages,"candidate_count":len(candidates),"candidates":candidates}
+          pathlib.Path("case_output/CANDIDATES_OAI.json").write_text(json.dumps(result,indent=2,sort_keys=True)+"\n")
+          print(json.dumps(result,indent=2,sort_keys=True))
+          if not candidates: raise SystemExit("No eligible OAI candidates discovered")
+          PY
+      - name: Upload fixed-case output
+        uses: actions/upload-artifact@v4
+        with:
+          name: case-4c9e1b7a2d6f8e0c3a5b7d9f1e2c4a6b-v3
+          path: case_output/
+          if-no-files-found: error
+          retention-days: 1
