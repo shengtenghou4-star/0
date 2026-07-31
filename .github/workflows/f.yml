@@ -1,5 +1,6 @@
 name: Matrix F
 
+# Triggered after lane registration.
 on:
   workflow_dispatch:
   push:
