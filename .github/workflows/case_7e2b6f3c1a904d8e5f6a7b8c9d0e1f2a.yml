@@ -1,0 +1,99 @@
+name: case-7e2b6f3c1a904d8e5f6a7b8c9d0e1f2a
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/case_7e2b6f3c1a904d8e5f6a7b8c9d0e1f2a.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  fixed-case:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Run fixed case
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p case_output
+          python - <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import urllib.parse
+          import urllib.request
+          import zipfile
+
+          records = [
+              ("1026507", "N2 on food_2010_07_06__10_04___3___1.wcon.zip", "fcb24949d523fd0d5d5b8a8f9da3a4bb", "train"),
+              ("1029071", "483 (AQ2947) on food L_2012_02_09__10_57_38___8___2.wcon.zip", "7d31398440157d6d254749fbd2a3f3f1", "train"),
+              ("1191748", "52_R_2_N2_7_Day2_CCW_2014_03_25__14_33_08___8___13.wcon.zip", "83ca917dbd4bd4abe3e916bafb940036", "train"),
+              ("1201276", "15_R_1_N2_6_day7_CCW_2014_02_28__09_19_34___7___4.wcon.zip", "e3656eb71fd4f9ee99fe2fd23353ce95", "confirmation"),
+              ("1191045", "6bis_R_4_N2_7_Day10_CCW_2014_05_02__10_33_09___1___6.wcon.zip", "4b936370004bb1914ac811f55415ada6", "sealed_unseen"),
+          ]
+          headers = {"User-Agent": "reference-matrix/1.0", "Accept": "application/json"}
+          root = pathlib.Path("case_output")
+          receipt = {"schema": "reference-matrix-case-v1", "case": "7e2b6f3c1a904d8e5f6a7b8c9d0e1f2a", "records": []}
+
+          for record_id, filename, expected_md5, split in records:
+              api_url = f"https://zenodo.org/api/records/{record_id}"
+              with urllib.request.urlopen(urllib.request.Request(api_url, headers=headers), timeout=120) as response:
+                  metadata = json.load(response)
+              matches = [entry for entry in metadata.get("files", []) if entry.get("key") == filename]
+              if len(matches) != 1:
+                  raise SystemExit(f"Expected one exact file in record {record_id}; found {len(matches)}")
+              entry = matches[0]
+              checksum = entry.get("checksum", "")
+              if checksum != f"md5:{expected_md5}":
+                  raise SystemExit(f"Metadata checksum mismatch for record {record_id}: {checksum}")
+              content_url = entry.get("links", {}).get("content") or entry.get("links", {}).get("self")
+              if not content_url:
+                  raise SystemExit(f"No content link for record {record_id}")
+              destination = root / filename
+              request = urllib.request.Request(content_url, headers={"User-Agent": "reference-matrix/1.0"})
+              md5 = hashlib.md5(usedforsecurity=False)
+              sha256 = hashlib.sha256()
+              size = 0
+              with urllib.request.urlopen(request, timeout=180) as response, destination.open("wb") as handle:
+                  while True:
+                      chunk = response.read(1024 * 1024)
+                      if not chunk:
+                          break
+                      handle.write(chunk)
+                      md5.update(chunk)
+                      sha256.update(chunk)
+                      size += len(chunk)
+              actual_md5 = md5.hexdigest()
+              if actual_md5 != expected_md5:
+                  raise SystemExit(f"Downloaded checksum mismatch for record {record_id}: {actual_md5}")
+              with zipfile.ZipFile(destination) as archive:
+                  bad = archive.testzip()
+                  if bad is not None:
+                      raise SystemExit(f"ZIP integrity failure for record {record_id}: {bad}")
+                  payloads = [name for name in archive.namelist() if name.endswith(".wcon")]
+                  if not payloads:
+                      raise SystemExit(f"No WCON payload for record {record_id}")
+              receipt["records"].append({
+                  "record_id": record_id,
+                  "filename": filename,
+                  "split": split,
+                  "bytes": size,
+                  "md5": actual_md5,
+                  "sha256": sha256.hexdigest(),
+                  "wcon_payloads": payloads,
+                  "verified": True,
+              })
+          receipt["all_verified"] = len(receipt["records"]) == len(records)
+          (root / "RECEIPT.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload fixed-case output
+        uses: actions/upload-artifact@v4
+        with:
+          name: case-7e2b6f3c1a904d8e5f6a7b8c9d0e1f2a
+          path: case_output/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
