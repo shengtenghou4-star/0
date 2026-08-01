@@ -1,0 +1,155 @@
+name: Matrix ZAL Outside Split 7a8f
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/matrix-zal-outsplit-7a8f.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: matrix-zal-outsplit-7a8f
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Recover exact authority-bound split sources
+        shell: bash
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          REQUEST_ID: 7a8f0d51de9c4b72a630f184c2e5d9b7
+          SOURCE_COMMIT: ea2075275ff2a5ec1a46308b8f1d3115c2579749
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/zalsplit /tmp/result
+          python - <<'PY'
+          import base64, hashlib, json, os, pathlib, urllib.parse, urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; request=os.environ['REQUEST_ID']; ref=os.environ['SOURCE_COMMIT']
+          expected={
+            'profile37_outside_degree_split_cnf.py':'1b2e345a558a6f4bc7ffb86bf7ce00e5f0bf4eba',
+            'profile37_outside_degree_split_batch.py':'45c363e1a1c143e32993882728314dd214b3a050',
+            'test_profile37_outside_degree_split.py':'29b42516e574307604f07086cbb0edfd139bdc98',
+          }
+          def fetch(repo,path,ref):
+              q=urllib.parse.urlencode({'ref':ref})
+              url=f'https://api.github.com/repos/{repo}/contents/{path}?{q}'
+              req=urllib.request.Request(url,headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'matrix-zal-outsplit-7a8f'})
+              with urllib.request.urlopen(req,timeout=120) as r: env=json.load(r)
+              return base64.b64decode(env['content'])
+          def blob_sha(data):
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          root=pathlib.Path('/tmp/zalsplit')
+          for name,want in expected.items():
+              data=fetch('shengtenghou4-star/21',f'attacks/z1617_exact/{name}',ref)
+              got=blob_sha(data)
+              if got!=want: raise SystemExit(f'authority source blob mismatch {name}: {got} != {want}')
+              (root/name).write_bytes(data)
+          request_data=fetch('shengtenghou4-star/00',f'relay/requests/{request}/input.json','main')
+          parsed=json.loads(request_data)
+          if parsed.get('mode')!='t4:7,8,8,8|8,8,8,8,9': raise SystemExit('request mode mismatch')
+          if parsed.get('inside')!=[7,8,8,8,8,8,8,8,9]: raise SystemExit('request inside mismatch')
+          if parsed.get('expected_symmetry_patterns')!=30: raise SystemExit('request pattern count mismatch')
+          (root/'input.json').write_bytes(request_data)
+          receipt={
+            'schema':'profile37-outside-split-source-recovery/v1',
+            'source_repository':'shengtenghou4-star/21',
+            'source_commit':ref,
+            'source_git_blobs':expected,
+            'request_id':request,
+            'request_input_sha256':hashlib.sha256(request_data).hexdigest(),
+          }
+          (root/'source-recovery-receipt.json').write_text(json.dumps(receipt,indent=2,sort_keys=True)+'\n')
+          PY
+
+      - name: Run deterministic split tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/zalsplit
+          python -m unittest -v test_profile37_outside_degree_split.py | tee /tmp/result/unit-tests.log
+
+      - name: Build fixed CaDiCaL solver
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/arminbiere/cadical.git /tmp/cadical >/dev/null 2>&1
+          git -C /tmp/cadical rev-parse HEAD > /tmp/result/solver-source-commit.txt
+          cd /tmp/cadical
+          ./configure >/dev/null
+          make -j2 >/dev/null
+          /tmp/cadical/build/cadical --version > /tmp/result/solver-version.txt
+          sha256sum /tmp/cadical/build/cadical > /tmp/result/solver.sha256
+
+      - name: Execute complete outside-degree symmetry cover
+        shell: bash
+        run: |
+          set +e
+          mkdir -p /tmp/result/split
+          timeout --signal=TERM 19800 python /tmp/zalsplit/profile37_outside_degree_split_batch.py \
+            --inside 7,8,8,8,8,8,8,8,9 \
+            --t 4 \
+            --solver /tmp/cadical/build/cadical \
+            --case-script /tmp/zalsplit/profile37_outside_degree_split_cnf.py \
+            --workdir /tmp/result/split \
+            --timeout-per-case 600 \
+            --workers 2 \
+            > /tmp/result/batch.stdout.txt 2> /tmp/result/batch.stderr.txt
+          rc=$?
+          printf '%s\n' "$rc" > /tmp/result/return-code.txt
+          cp /tmp/zalsplit/input.json /tmp/result/
+          cp /tmp/zalsplit/source-recovery-receipt.json /tmp/result/
+          exit 0
+
+      - name: Store private result
+        if: always()
+        shell: bash
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          REQUEST_ID: 7a8f0d51de9c4b72a630f184c2e5d9b7
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, tarfile, time, urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; request=os.environ['REQUEST_ID']; run=os.environ['RUN_ID']; attempt=os.environ['RUN_ATTEMPT']
+          repo='shengtenghou4-star/00'; branch='results'; root=pathlib.Path('/tmp/result')
+          stream=io.BytesIO()
+          with tarfile.open(fileobj=stream,mode='w:gz',format=tarfile.PAX_FORMAT) as tf:
+              for p in sorted(root.rglob('*')):
+                  if p.is_symlink(): raise SystemExit('unsafe result')
+                  tf.add(p,arcname=p.relative_to(root),recursive=False)
+          package=stream.getvalue()
+          if len(package)>90*1024*1024: raise SystemExit(f'result too large: {len(package)}')
+          rc=int((root/'return-code.txt').read_text().strip()) if (root/'return-code.txt').exists() else 255
+          manifest_path=root/'split'/'cover-manifest.json'
+          verdict=None
+          if manifest_path.exists(): verdict=json.loads(manifest_path.read_text()).get('verdict')
+          receipt={
+            'schema':1,'capsule_id':request,'run_id':run,'run_attempt':attempt,
+            'return_code':rc,'result_bytes':len(package),'result_sha256':hashlib.sha256(package).hexdigest(),
+            'cover_verdict':verdict,'finished_unix':int(time.time())
+          }
+          def put(path,data,message):
+              url=f'https://api.github.com/repos/{repo}/contents/{path}'
+              body=json.dumps({'message':message,'content':base64.b64encode(data).decode(),'branch':branch},separators=(',',':')).encode()
+              req=urllib.request.Request(url,data=body,method='PUT',headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'matrix-zal-outsplit-7a8f'})
+              with urllib.request.urlopen(req,timeout=300) as r: r.read()
+          prefix=f'relay/results/{request}/{run}-{attempt}'
+          put(f'{prefix}/result.tar.gz',package,'Store ZAL outside-degree split package')
+          put(f'{prefix}/receipt.json',(json.dumps(receipt,sort_keys=True,indent=2)+'\n').encode(),'Store ZAL outside-degree split receipt')
+          print('ZAL outside-degree split result stored privately.')
+          PY
