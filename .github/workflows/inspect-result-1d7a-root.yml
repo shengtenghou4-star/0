@@ -1,0 +1,49 @@
+name: Inspect Result 1d7a Root
+
+on:
+  push:
+    paths:
+      - '.github/workflows/inspect-result-1d7a-root.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Inspect root audit files in private result archive
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, tarfile, urllib.parse, urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; repo='shengtenghou4-star/00'; branch='results'
+          cid='1d7a4b1ee80f4898a7c9f4c9a11af4e2'; run='30644078750-1'
+          def api(path, *, accept='application/vnd.github+json', method='GET', data=None):
+              safe='/'.join(urllib.parse.quote(x,safe='') for x in path.split('/'))
+              url=f'https://api.github.com/repos/{repo}/contents/{safe}'
+              if method=='GET': url += '?' + urllib.parse.urlencode({'ref':branch})
+              headers={'Authorization':f'Bearer {token}','Accept':accept,'X-GitHub-Api-Version':'2022-11-28','User-Agent':'inspect-result-1d7a-root'}
+              if data is not None: headers['Content-Type']='application/json'
+              req=urllib.request.Request(url,data=data,method=method,headers=headers)
+              with urllib.request.urlopen(req,timeout=300) as r: return r.read()
+          raw=api(f'relay/results/{cid}/{run}/result.tar.gz',accept='application/vnd.github.raw+json')
+          wanted={'retarget-receipt.json','original-task.sha256','patched-task.sha256','target-input.sha256','runner.sha256','solver-source-commit.txt','solver-version.txt','return-code.txt','output/payload-files.sha256','output/input.json','output/summary.json'}
+          report={'schema':1,'capsule_id':cid,'run':run,'archive_bytes':len(raw),'archive_sha256':hashlib.sha256(raw).hexdigest(),'files':{},'members':[]}
+          with tarfile.open(fileobj=io.BytesIO(raw),mode='r:gz') as tf:
+              for m in tf.getmembers():
+                  p=pathlib.PurePosixPath(m.name)
+                  if p.is_absolute() or '..' in p.parts or m.issym() or m.islnk() or m.isdev(): raise SystemExit('unsafe archive')
+                  report['members'].append({'name':m.name,'size':m.size,'type':'file' if m.isfile() else 'other'})
+                  if m.isfile() and m.name in wanted:
+                      data=tf.extractfile(m).read()
+                      report['files'][m.name]={'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),'content':data.decode('utf-8','replace')}
+          payload=(json.dumps(report,sort_keys=True,indent=2)+'\n').encode()
+          out=f'relay/focused-inspections/{cid}/{run}/root-inspection-v1.json'
+          body=json.dumps({'message':'Store corrected ZAL root inspection','content':base64.b64encode(payload).decode(),'branch':branch},separators=(',',':')).encode()
+          api(out,method='PUT',data=body)
+          PY
