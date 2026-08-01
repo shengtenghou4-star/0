@@ -1,0 +1,146 @@
+name: Matrix 531c
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/matrix-531c.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: matrix-531c
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Configure runtime
+        run: python -m pip install --disable-pip-version-check numpy
+
+      - name: Recover, retarget and audit validated engine
+        shell: bash
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          ENGINE_ID: 8e47fe6a0738c37c3107c46e1a8b8815
+          TARGET_INPUT_ID: 531c0a7e8b9d4f21a6c3e5d7f9012b4c
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, re, tarfile, urllib.parse, urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; engine=os.environ['ENGINE_ID']; target_id=os.environ['TARGET_INPUT_ID']
+          repo='shengtenghou4-star/00'; ref='main'
+          def fetch(path):
+              q=urllib.parse.urlencode({'ref':ref})
+              url=f'https://api.github.com/repos/{repo}/contents/{path}?{q}'
+              req=urllib.request.Request(url,headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'matrix-531c'})
+              with urllib.request.urlopen(req,timeout=120) as r: env=json.load(r)
+              return base64.b64decode(env['content'])
+          manifest=json.loads(fetch(f'relay/requests/{engine}/manifest.json'))
+          wrapper=fetch(f'relay/requests/{engine}/payload.tar.gz.b64')
+          payload=base64.b64decode(b''.join(wrapper.split()),validate=True)
+          if hashlib.sha256(payload).hexdigest()!=manifest['payload_sha256']: raise SystemExit('engine digest mismatch')
+          dest=pathlib.Path('/tmp/capsule'); dest.mkdir()
+          with tarfile.open(fileobj=io.BytesIO(payload),mode='r:gz') as tf:
+              for m in tf.getmembers():
+                  p=pathlib.Path(m.name)
+                  if p.is_absolute() or '..' in p.parts or m.issym() or m.islnk() or m.isdev(): raise SystemExit('unsafe archive')
+              tf.extractall(dest,filter='data')
+          target=fetch(f'relay/requests/{target_id}/input.json'); parsed=json.loads(target)
+          expected=[7,8,8,8,8,8,8,8,10]
+          if parsed.get('inside')!=expected or parsed.get('mode')!='t4:7,8,8,8|8,8,8,8,10': raise SystemExit('invalid target')
+          task=dest/'task.py'; original=task.read_text()
+          old='t=4; inside=[8,8,9,9,7,8,8,8,9]'
+          new='t=4; inside=[7,8,8,8,8,8,8,8,10]'
+          if original.count(old)!=1: raise SystemExit('task retarget anchor mismatch')
+          patched=original.replace(old,new)
+          task.write_text(patched)
+          run=dest/'run.sh'; run_text=run.read_text()
+          if run_text.count('--max-layer 5')!=1: raise SystemExit('run depth anchor mismatch')
+          run.write_text(run_text.replace('--max-layer 5','--max-layer 7'))
+          (dest/'input.json').write_bytes(target)
+          receipt={
+            'schema':'opaque-engine-retarget/v1','engine_capsule':engine,
+            'engine_payload_sha256':manifest['payload_sha256'],
+            'original_task_sha256':hashlib.sha256(original.encode()).hexdigest(),
+            'patched_task_sha256':hashlib.sha256(patched.encode()).hexdigest(),
+            'target_input_sha256':hashlib.sha256(target).hexdigest(),
+            'old_inside':[8,8,9,9,7,8,8,8,9],
+            'new_inside':expected,'max_layer':7,
+            'patch_rule':'single exact source-anchor substitution; all other engine code unchanged'
+          }
+          (dest/'retarget-receipt.json').write_text(json.dumps(receipt,indent=2,sort_keys=True)+'\n')
+          PY
+
+      - name: Build fixed solver
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/arminbiere/cadical.git /tmp/cadical >/dev/null 2>&1
+          git -C /tmp/cadical rev-parse HEAD > /tmp/capsule/solver-source-commit.txt
+          cd /tmp/cadical
+          ./configure >/dev/null
+          make -j2 >/dev/null
+          cd "$GITHUB_WORKSPACE"
+          g++ -O3 -std=c++17 /tmp/capsule/runner.cpp -I/tmp/cadical/src /tmp/cadical/build/libcadical.a -lpthread -o /tmp/opaque-runner
+          /tmp/cadical/build/cadical --version > /tmp/capsule/solver-version.txt
+          sha256sum /tmp/opaque-runner > /tmp/capsule/runner.sha256
+
+      - name: Execute isolated request
+        shell: bash
+        run: |
+          set +e
+          mkdir -p /tmp/result/output
+          timeout --signal=TERM 19500 bash /tmp/capsule/run.sh /tmp/result/output /tmp/opaque-runner > /tmp/result/stdout.txt 2> /tmp/result/stderr.txt
+          rc=$?
+          printf '%s\n' "$rc" > /tmp/result/return-code.txt
+          cp /tmp/capsule/retarget-receipt.json /tmp/result/
+          cp /tmp/capsule/solver-source-commit.txt /tmp/result/
+          cp /tmp/capsule/solver-version.txt /tmp/result/
+          cp /tmp/capsule/runner.sha256 /tmp/result/
+          exit 0
+
+      - name: Store private result
+        if: always()
+        shell: bash
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          REQUEST_ID: 531c0a7e8b9d4f21a6c3e5d7f9012b4c
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, tarfile, time, urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; request=os.environ['REQUEST_ID']; run=os.environ['RUN_ID']; attempt=os.environ['RUN_ATTEMPT']
+          repo='shengtenghou4-star/00'; branch='results'; root=pathlib.Path('/tmp/result')
+          stream=io.BytesIO()
+          with tarfile.open(fileobj=stream,mode='w:gz',format=tarfile.PAX_FORMAT) as tf:
+              for p in sorted(root.rglob('*')):
+                  if p.is_symlink(): raise SystemExit('unsafe result')
+                  tf.add(p,arcname=p.relative_to(root),recursive=False)
+          package=stream.getvalue()
+          if len(package)>90*1024*1024: raise SystemExit('result too large')
+          rc=int((root/'return-code.txt').read_text().strip()) if (root/'return-code.txt').exists() else 255
+          receipt={'schema':1,'capsule_id':request,'run_id':run,'run_attempt':attempt,'return_code':rc,'result_bytes':len(package),'result_sha256':hashlib.sha256(package).hexdigest(),'finished_unix':int(time.time())}
+          def put(path,data,message):
+              url=f'https://api.github.com/repos/{repo}/contents/{path}'
+              body=json.dumps({'message':message,'content':base64.b64encode(data).decode(),'branch':branch},separators=(',',':')).encode()
+              req=urllib.request.Request(url,data=body,method='PUT',headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'matrix-531c'})
+              with urllib.request.urlopen(req,timeout=300) as r: r.read()
+          prefix=f'relay/results/{request}/{run}-{attempt}'
+          put(f'{prefix}/result.tar.gz',package,'Store next ZAL exact result package')
+          put(f'{prefix}/receipt.json',(json.dumps(receipt,sort_keys=True,indent=2)+'\n').encode(),'Store next ZAL exact result receipt')
+          print('Next ZAL result stored privately.')
+          PY
