@@ -1,0 +1,266 @@
+name: Audit Result 1d7a v4
+
+on:
+  push:
+    paths:
+      - '.github/workflows/audit-result-1d7a-v4.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Adversarially audit corrected ZAL proof archive
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, re, tarfile, urllib.parse, urllib.request, zlib
+
+          token=os.environ['LAB_QUEUE_TOKEN']
+          result_repo='shengtenghou4-star/00'
+          result_branch='results'
+          authority_repo='shengtenghou4-star/21'
+          authority_branch='agent/z1617-profile37'
+          cid='1d7a4b1ee80f4898a7c9f4c9a11af4e2'
+          run='30644078750-1'
+          mode_ledger='8,8,8,8|7,8,8,8,10'
+          mode_full='t4:'+mode_ledger
+          target_inside=[8,8,8,8,7,8,8,8,10]
+
+          def get(repo, branch, path, raw=False):
+              safe='/'.join(urllib.parse.quote(x,safe='') for x in path.split('/'))
+              url=f'https://api.github.com/repos/{repo}/contents/{safe}?'+urllib.parse.urlencode({'ref':branch})
+              accept='application/vnd.github.raw+json' if raw else 'application/vnd.github+json'
+              req=urllib.request.Request(url,headers={
+                  'Authorization':f'Bearer {token}',
+                  'Accept':accept,
+                  'X-GitHub-Api-Version':'2022-11-28',
+                  'User-Agent':'audit-result-1d7a-v4'
+              })
+              with urllib.request.urlopen(req,timeout=300) as r:
+                  data=r.read()
+              if raw:
+                  return data
+              env=json.loads(data)
+              return base64.b64decode(env['content'])
+
+          def put(repo, branch, path, payload, message):
+              safe='/'.join(urllib.parse.quote(x,safe='') for x in path.split('/'))
+              url=f'https://api.github.com/repos/{repo}/contents/{safe}'
+              body=json.dumps({'message':message,'content':base64.b64encode(payload).decode(),'branch':branch},separators=(',',':')).encode()
+              req=urllib.request.Request(url,data=body,method='PUT',headers={
+                  'Authorization':f'Bearer {token}',
+                  'Accept':'application/vnd.github+json',
+                  'Content-Type':'application/json',
+                  'X-GitHub-Api-Version':'2022-11-28',
+                  'User-Agent':'audit-result-1d7a-v4'
+              })
+              with urllib.request.urlopen(req,timeout=300) as r:
+                  r.read()
+
+          prefix=f'relay/results/{cid}/{run}'
+          receipt=json.loads(get(result_repo,result_branch,f'{prefix}/receipt.json'))
+          archive=get(result_repo,result_branch,f'{prefix}/result.tar.gz',raw=True)
+          archive_sha=hashlib.sha256(archive).hexdigest()
+          ledger=json.loads(get(authority_repo,authority_branch,'results/z1617_exact_attack/profile37_t4_authoritative_mode_ledger_v1.json'))
+
+          files={}
+          member_meta=[]
+          with tarfile.open(fileobj=io.BytesIO(archive),mode='r:gz') as tf:
+              for m in tf.getmembers():
+                  p=pathlib.PurePosixPath(m.name)
+                  if p.is_absolute() or '..' in p.parts or m.issym() or m.islnk() or m.isdev():
+                      raise SystemExit(f'unsafe archive member: {m.name}')
+                  meta={'name':m.name,'size':m.size,'type':'file' if m.isfile() else 'other'}
+                  if m.isfile():
+                      data=tf.extractfile(m).read()
+                      meta['sha256']=hashlib.sha256(data).hexdigest()
+                      files[m.name]=data
+                  member_meta.append(meta)
+
+          def text(name):
+              return files[name].decode('utf-8','strict')
+
+          def parsed(name):
+              return json.loads(text(name))
+
+          checks={}
+          checks['receipt_capsule_match']=receipt.get('capsule_id')==cid
+          checks['receipt_run_match']=str(receipt.get('run_id'))==run.split('-')[0] and str(receipt.get('run_attempt'))==run.split('-')[1]
+          checks['archive_size_match']=receipt.get('result_bytes')==len(archive)
+          checks['archive_sha256_match']=receipt.get('result_sha256')==archive_sha
+          checks['receipt_return_code_zero']=receipt.get('return_code')==0
+          checks['wrapper_return_code_zero']=text('return-code.txt').strip()=='0'
+
+          inp=parsed('output/input.json')
+          summary=parsed('output/summary.json')
+          retarget=parsed('retarget-receipt.json')
+          checks['input_schema_match']=inp.get('schema')=='profile37-target-input/v1'
+          checks['input_mode_match']=inp.get('mode')==mode_full
+          checks['input_inside_match']=inp.get('inside')==target_inside
+          checks['summary_t_match']=summary.get('t')==4
+          checks['summary_inside_match']=summary.get('inside')==target_inside
+          checks['summary_profile_match']=summary.get('profile')==([9]+[8]*13+[7]*2+[6])
+          checks['summary_sat_zero']=summary.get('sat')==0
+
+          # Retarget receipt is treated as evidence, not trusted prose.
+          retarget_blob=json.dumps(retarget,sort_keys=True)
+          checks['retarget_mentions_target_inside']=json.dumps(target_inside,separators=(',',':')) in retarget_blob.replace(' ','')
+          replacement_values=[v for k,v in retarget.items() if 'replace' in k.lower() and isinstance(v,int)]
+          checks['retarget_single_anchor']=1 in replacement_values
+
+          # Hash binding for target input and patched task.
+          checks['target_input_sha_match']=text('target-input.sha256').strip()==hashlib.sha256(files['output/input.json']).hexdigest()
+          payload_lines={}
+          for line in text('output/payload-files.sha256').splitlines():
+              if not line.strip(): continue
+              digest,path=line.split(None,1)
+              payload_lines[path.strip()]=digest
+          checks['payload_input_sha_match']=payload_lines.get('/tmp/capsule/input.json')==hashlib.sha256(files['output/input.json']).hexdigest()
+          checks['payload_runner_sha_match']=payload_lines.get('/tmp/capsule/runner.cpp') in text('runner.sha256')
+          patched_sha_candidates=[text(n).strip().split()[0] for n in files if n.endswith('patched-task.sha256')]
+          original_sha_candidates=[text(n).strip().split()[0] for n in files if n.endswith('original-task.sha256')]
+          checks['patched_task_sha_bound']=bool(patched_sha_candidates) and payload_lines.get('/tmp/capsule/task.py') in patched_sha_candidates
+          checks['original_task_sha_distinct']=bool(original_sha_candidates and patched_sha_candidates) and original_sha_candidates[0]!=patched_sha_candidates[0]
+
+          # CNF digest and DIMACS header/clause accounting.
+          cnf_name=next((n for n in files if n.endswith('base.cnf')),None)
+          checks['cnf_present']=cnf_name is not None
+          cnf_audit={}
+          if cnf_name:
+              cnf=files[cnf_name]
+              actual_sha=hashlib.sha256(cnf).hexdigest()
+              declared_vars=declared_clauses=None
+              clause_zeros=0
+              for raw_line in cnf.splitlines():
+                  line=raw_line.strip()
+                  if not line or line.startswith(b'c'): continue
+                  if line.startswith(b'p '):
+                      parts=line.split()
+                      declared_vars=int(parts[2]); declared_clauses=int(parts[3])
+                  else:
+                      clause_zeros += sum(tok==b'0' for tok in line.split())
+              cnf_audit={'name':cnf_name,'sha256':actual_sha,'declared_variables':declared_vars,'declared_clauses':declared_clauses,'counted_clause_terminators':clause_zeros}
+              scnf=summary.get('cnf',{})
+              checks['cnf_sha_match']=scnf.get('sha256')==actual_sha
+              checks['cnf_variables_match']=scnf.get('variables')==declared_vars
+              checks['cnf_clauses_match']=scnf.get('clauses')==declared_clauses==clause_zeros
+          else:
+              checks['cnf_sha_match']=checks['cnf_variables_match']=checks['cnf_clauses_match']=False
+
+          # Exact-cover, v4, and explicit solver accounting at every reached layer.
+          layer_audit={}
+          layers=summary.get('layers',{})
+          ordered=[x for x in ('third','fourth','fifth','sixth','seventh') if x in layers]
+          previous_open=None
+          all_layer_checks=True
+          all_solver_sat_zero=True
+          for lname in ordered:
+              layer=layers[lname]
+              ordinary=layer.get('ordinary',{})
+              raw=ordinary.get('raw')
+              retained=ordinary.get('ordinary_retained')
+              reject_sum=sum(v for k,v in ordinary.items() if k not in {'raw','parents','ordinary_retained'} and isinstance(v,int))
+              ordinary_partition=(isinstance(raw,int) and isinstance(retained,int) and raw==retained+reject_sum)
+              parent_chain=(previous_open is None or ordinary.get('parents')==previous_open)
+              v4=layer.get('v4',{})
+              per_k_sum=sum(v for obj in v4.get('per_k',{}).values() if isinstance(obj,dict) for v in obj.values() if isinstance(v,int))
+              v4_partition=(v4.get('input')==v4.get('rejected',0)+v4.get('retained',0))
+              v4_reject_sum=(v4.get('rejected')==per_k_sum)
+              solver=layer.get('solver',{})
+              solver_accounting=(solver.get('input')==solver.get('unsat',0)+solver.get('sat',0)+solver.get('open',0))
+              budget_accounting=(solver.get('unsat')==sum(solver.get('unsat_by_budget',{}).values()))
+              survivors_match=(layer.get('survivors')==solver.get('open'))
+              sat_zero=(solver.get('sat')==0)
+              exit_consistent=((solver.get('open')==0 and solver.get('exit_code')==20) or (solver.get('open',0)>0 and solver.get('exit_code')==0))
+              layer_ok=all((ordinary_partition,parent_chain,v4_partition,v4_reject_sum,solver_accounting,budget_accounting,survivors_match,sat_zero,exit_consistent))
+              layer_audit[lname]={
+                  'ordinary_partition':ordinary_partition,'parent_chain':parent_chain,
+                  'v4_partition':v4_partition,'v4_reject_sum':v4_reject_sum,
+                  'solver_accounting':solver_accounting,'budget_accounting':budget_accounting,
+                  'survivors_match':survivors_match,'sat_zero':sat_zero,'exit_consistent':exit_consistent,
+                  'raw':raw,'ordinary_retained':retained,'v4_rejected':v4.get('rejected'),
+                  'solver_input':solver.get('input'),'unsat':solver.get('unsat'),'sat':solver.get('sat'),'open':solver.get('open')
+              }
+              all_layer_checks &= layer_ok
+              all_solver_sat_zero &= sat_zero
+              previous_open=solver.get('open')
+          checks['layer_sequence_nonempty']=bool(ordered)
+          checks['all_layer_partitions']=all_layer_checks
+          checks['all_solver_sat_zero']=all_solver_sat_zero
+          checks['final_open_zero']=previous_open==0
+          checks['stopped_after_terminal']=ordered[-1]=='fifth' and previous_open==0
+
+          # Open-map hashes and entry counts must agree with the summary.
+          map_audit={}
+          all_maps=True
+          for lname in ordered:
+              name=f'output/{lname}.open.map.json.zlib.b64'
+              if name not in files:
+                  all_maps=False
+                  map_audit[name]={'present':False}
+                  continue
+              encoded=files[name]
+              packed=base64.b64decode(b''.join(encoded.split()),validate=True)
+              decoded=zlib.decompress(packed)
+              obj=json.loads(decoded)
+              top=summary.get(f'{lname}_open_map',{})
+              audit={
+                  'present':True,
+                  'encoded_sha256':hashlib.sha256(encoded).hexdigest(),
+                  'decoded_sha256':hashlib.sha256(decoded).hexdigest(),
+                  'entries':len(obj),
+                  'summary_encoded_sha256':top.get('encoded_sha256'),
+                  'summary_decoded_sha256':top.get('decoded_sha256'),
+                  'summary_entries':top.get('entries')
+              }
+              audit['match']=(audit['encoded_sha256']==audit['summary_encoded_sha256'] and audit['decoded_sha256']==audit['summary_decoded_sha256'] and audit['entries']==audit['summary_entries']==layers[lname]['survivors'])
+              all_maps &= audit['match']
+              map_audit[name]=audit
+          checks['all_open_maps_match']=all_maps
+
+          # Canonical ledger deduplication.
+          terminal_modes={x.get('mode') for x in ledger.get('exact_terminal_modes',[])}
+          open_modes={x.get('mode') for x in ledger.get('open_modes',[])}
+          counts=ledger.get('counts',{})
+          checks['ledger_mode_absent_terminal']=mode_ledger not in terminal_modes
+          checks['ledger_mode_present_open']=mode_ledger in open_modes
+          checks['ledger_counts_consistent']=(counts.get('terminal_total')+counts.get('open')==counts.get('total')==176 and counts.get('sat')==0)
+
+          required=[
+              'receipt_capsule_match','receipt_run_match','archive_size_match','archive_sha256_match','receipt_return_code_zero','wrapper_return_code_zero',
+              'input_schema_match','input_mode_match','input_inside_match','summary_t_match','summary_inside_match','summary_profile_match','summary_sat_zero',
+              'retarget_mentions_target_inside','retarget_single_anchor','target_input_sha_match','payload_input_sha_match','payload_runner_sha_match',
+              'patched_task_sha_bound','original_task_sha_distinct','cnf_present','cnf_sha_match','cnf_variables_match','cnf_clauses_match',
+              'layer_sequence_nonempty','all_layer_partitions','all_solver_sat_zero','final_open_zero','stopped_after_terminal','all_open_maps_match',
+              'ledger_mode_absent_terminal','ledger_mode_present_open','ledger_counts_consistent'
+          ]
+          accepted=all(checks.get(k) is True for k in required)
+
+          selected={}
+          for name in sorted(files):
+              if name in {'retarget-receipt.json','output/input.json','output/summary.json','output/payload-files.sha256','return-code.txt','target-input.sha256','runner.sha256','solver-source-commit.txt','solver-version.txt'} or name.endswith('task.sha256') or name.endswith('.solver.summary.json'):
+                  if len(files[name])<=2_000_000:
+                      selected[name]={'sha256':hashlib.sha256(files[name]).hexdigest(),'content':files[name].decode('utf-8','replace')}
+
+          report={
+              'schema':'profile37-corrected-result-adversarial-audit/v1',
+              'capsule_id':cid,'run':run,'mode':mode_full,'accepted':accepted,
+              'receipt':receipt,'archive_bytes':len(archive),'archive_sha256':archive_sha,
+              'checks':checks,'required_checks':required,'retarget_receipt':retarget,
+              'cnf_audit':cnf_audit,'layer_audit':layer_audit,'map_audit':map_audit,
+              'ledger_audit':{'ledger_schema':ledger.get('schema'),'counts':counts,'mode_absent_terminal':checks['ledger_mode_absent_terminal'],'mode_present_open':checks['ledger_mode_present_open']},
+              'selected_files':selected,'members':member_meta,
+              'decision':'ACCEPT_TERMINAL_UNSAT' if accepted else 'REJECT_OR_HOLD_NO_PROOF_CREDIT'
+          }
+          payload=(json.dumps(report,sort_keys=True,indent=2)+'\n').encode()
+          out=f'relay/focused-inspections/{cid}/{run}/adversarial-audit-v1.json'
+          put(result_repo,result_branch,out,payload,'Store adversarial ZAL result audit')
+          print(json.dumps({'out':out,'accepted':accepted,'failed':[k for k in required if checks.get(k) is not True]},sort_keys=True))
+          PY
