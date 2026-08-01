@@ -1,0 +1,69 @@
+name: Audit Result 531c v4
+
+on:
+  push:
+    paths:
+      - '.github/workflows/audit-result-531c-v4.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Audit final target statuses
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64,hashlib,io,json,os,pathlib,tarfile,urllib.parse,urllib.request,zlib
+          token=os.environ['LAB_QUEUE_TOKEN'];repo='shengtenghou4-star/00';branch='results';cid='531c0a7e8b9d4f21a6c3e5d7f9012b4c';run='30685883451-1';target=[7,8,8,8,8,8,8,8,10];old=[8,8,9,9,7,8,8,8,9];mode='t4:7,8,8,8|8,8,8,8,10'
+          def api(path,accept='application/vnd.github+json',method='GET',data=None):
+            safe='/'.join(urllib.parse.quote(x,safe='') for x in path.split('/'));url=f'https://api.github.com/repos/{repo}/contents/{safe}'+(('?'+urllib.parse.urlencode({'ref':branch})) if method=='GET' else '');h={'Authorization':f'Bearer {token}','Accept':accept,'X-GitHub-Api-Version':'2022-11-28','User-Agent':'audit-531c-v4'}
+            if data is not None:h['Content-Type']='application/json'
+            with urllib.request.urlopen(urllib.request.Request(url,data=data,method=method,headers=h),timeout=300) as r:return r.read()
+          p=f'relay/results/{cid}/{run}';e=json.loads(api(f'{p}/receipt.json'));receipt=json.loads(base64.b64decode(e['content']));raw=api(f'{p}/result.tar.gz','application/vnd.github.raw+json');files={};members=[]
+          with tarfile.open(fileobj=io.BytesIO(raw),mode='r:gz') as tf:
+            for m in tf.getmembers():
+              q=pathlib.PurePosixPath(m.name)
+              if q.is_absolute() or '..' in q.parts or m.issym() or m.islnk() or m.isdev():raise SystemExit('unsafe archive')
+              z={'name':m.name,'size':m.size,'type':'file' if m.isfile() else 'other'}
+              if m.isfile():d=tf.extractfile(m).read();files[m.name]=d;z['sha256']=hashlib.sha256(d).hexdigest()
+              members.append(z)
+          text=lambda n:files[n].decode('utf-8','replace');js=lambda n:json.loads(text(n));inp=js('output/input.json');summary=js('output/summary.json');retarget=js('retarget-receipt.json')
+          checks={'receipt_capsule':receipt.get('capsule_id')==cid,'receipt_run':str(receipt.get('run_id'))=='30685883451' and str(receipt.get('run_attempt'))=='1','archive_bytes':receipt.get('result_bytes')==len(raw),'archive_sha':receipt.get('result_sha256')==hashlib.sha256(raw).hexdigest(),'return_codes':receipt.get('return_code')==0 and text('return-code.txt').strip()=='0','input_target':inp.get('schema')=='profile37-target-input/v1' and inp.get('mode')==mode and inp.get('inside')==target,'input_dedup':inp.get('deduplication',{}).get('mode_absent_from_terminal_set') is True and inp.get('deduplication',{}).get('mode_present_in_open_set') is True,'summary_target':summary.get('t')==4 and summary.get('inside')==target and summary.get('profile')==([9]+[8]*13+[7]*2+[6]),'summary_sat_zero':summary.get('sat')==0,'retarget_identity':retarget.get('schema')=='opaque-engine-retarget/v1' and retarget.get('engine_capsule')=='8e47fe6a0738c37c3107c46e1a8b8815' and retarget.get('engine_payload_sha256')=='c219e70ec357f8ba0cb34eb82c7d1d51406f7b823728f18818d93ff2118d13d3','retarget_vectors':retarget.get('old_inside')==old and retarget.get('new_inside')==target and retarget.get('max_layer')==7,'retarget_rule':retarget.get('patch_rule')=='single exact source-anchor substitution; all other engine code unchanged','retarget_hash_changed':retarget.get('original_task_sha256')!=retarget.get('patched_task_sha256')}
+          payload={}
+          for line in text('output/payload-files.sha256').splitlines():
+            if line.strip():h,pn=line.split(None,1);payload[pn.strip()]=h
+          ish=hashlib.sha256(files['output/input.json']).hexdigest();checks['payload_bindings']=payload.get('/tmp/capsule/input.json')==ish==retarget.get('target_input_sha256') and payload.get('/tmp/capsule/task.py')==retarget.get('patched_task_sha256') and payload.get('/tmp/capsule/runner.cpp')=='d57e79c6475fb2fcbeeb3298276660c712167c96f9c507f152a013a522b3cc7c';checks['solver_receipts']=len(text('solver-source-commit.txt').strip())==40 and bool(text('solver-version.txt').strip()) and len(text('runner.sha256').strip().split()[0])==64
+          cn=next(n for n in files if n.endswith('base.cnf'));cnf=files[cn];csha=hashlib.sha256(cnf).hexdigest();dv=dc=None;zeros=0
+          for q in cnf.splitlines():
+            q=q.strip()
+            if not q or q.startswith(b'c'):continue
+            if q.startswith(b'p '):a=q.split();dv=int(a[2]);dc=int(a[3])
+            else:zeros+=sum(t==b'0' for t in q.split())
+          sc=summary['cnf'];checks['cnf_binding']=sc.get('sha256')==csha and sc.get('variables')==dv and sc.get('clauses')==dc==zeros;cnf_audit={'name':cn,'sha256':csha,'variables':dv,'declared_clauses':dc,'counted_clauses':zeros}
+          layers=summary['layers'];ordered=[x for x in ('third','fourth','fifth','sixth','seventh') if x in layers];layer_audit={};prev=None;allok=True
+          for lname in ordered:
+            L=layers[lname];V=L['v4'];S=L['solver'];ordinary_ok=(L.get('exact_orbits')==V.get('input')) if lname=='third' else (lambda O:(O['raw']==O['ordinary_retained']+sum(v for k,v in O.items() if k not in {'raw','parents','ordinary_retained'} and isinstance(v,int)) and O['parents']==prev))(L['ordinary']);v4sum=sum(v for d in V.get('per_k',{}).values() for v in d.values());v4_ok=V['input']==V['rejected']+V['retained'] and V['rejected']==v4sum and V['retained']==S['input'];solver_ok=S['input']==S['unsat']+S['sat']+S['open'] and S['unsat']==sum(S['unsat_by_budget'].values()) and L['survivors']==S['open'] and S['sat']==0 and ((S['open']==0 and S['exit_code']==20) or (S['open']>0 and S['exit_code']==0))
+            log=f'output/{lname}.solver.jsonl';final={};attempts=0;malformed=[]
+            for line in text(log).splitlines():
+              s=line.strip()
+              if not s:continue
+              try:r=json.loads(s)
+              except json.JSONDecodeError:continue
+              if not isinstance(r,dict) or r.get('phase')!='target':continue
+              attempts+=1;tid=r.get('id');st=r.get('status')
+              if not isinstance(tid,int) or st not in {0,10,20}:malformed.append(r);continue
+              final[tid]=st
+            counts={'UNSAT':sum(v==20 for v in final.values()),'SAT':sum(v==10 for v in final.values()),'UNKNOWN':sum(v==0 for v in final.values())};explicit_ok=not malformed and hashlib.sha256(files[log]).hexdigest()==S.get('log_sha256') and len(final)==S['input'] and counts['UNSAT']==S['unsat'] and counts['SAT']==S['sat'] and counts['UNKNOWN']==S['open'];ok=ordinary_ok and v4_ok and solver_ok and explicit_ok;allok &= ok;prev=S['open'];layer_audit[lname]={'ok':ok,'ordinary_ok':ordinary_ok,'v4_ok':v4_ok,'solver_ok':solver_ok,'explicit_final_status_ok':explicit_ok,'attempt_records':attempts,'unique_targets':len(final),'status_counts':counts,'malformed':malformed[:5],'exact_orbits':L.get('exact_orbits'),'raw':L.get('ordinary',{}).get('raw'),'v4_input':V.get('input'),'v4_rejected':V.get('rejected'),'solver_input':S.get('input'),'unsat':S.get('unsat'),'sat':S.get('sat'),'open':S.get('open')}
+          checks['layer_sequence']=ordered==['third','fourth','fifth','sixth'];checks['layer_accounting']=allok;checks['explicit_solver_logs']=all(x['explicit_final_status_ok'] for x in layer_audit.values());checks['terminal']=prev==0
+          maps={};mok=True
+          for lname in ordered:
+            n=f'output/{lname}.open.map.json.zlib.b64';enc=files[n];dec=zlib.decompress(base64.b64decode(b''.join(enc.split()),validate=True));s=dec.decode('utf-8');obj=[] if not s.strip() else (json.loads(s) if s.lstrip().startswith(('[','{')) else [json.loads(x) for x in s.splitlines() if x.strip()]);top=summary[f'{lname}_open_map'];ok=hashlib.sha256(enc).hexdigest()==top['encoded_sha256'] and hashlib.sha256(dec).hexdigest()==top['decoded_sha256'] and len(obj)==top['entries']==layers[lname]['survivors'];mok &= ok;maps[lname]={'ok':ok,'entries':len(obj),'encoded_sha256':hashlib.sha256(enc).hexdigest(),'decoded_sha256':hashlib.sha256(dec).hexdigest()}
+          checks['maps']=mok;accepted=all(checks.values());report={'schema':'profile37-result-adversarial-audit/v4','capsule_id':cid,'run':run,'mode':mode,'accepted':accepted,'decision':'ACCEPT_TERMINAL_UNSAT' if accepted else 'HOLD_NO_PROOF_CREDIT','failed_checks':[k for k,v in checks.items() if not v],'checks':checks,'receipt':receipt,'archive_bytes':len(raw),'archive_sha256':hashlib.sha256(raw).hexdigest(),'retarget_receipt':retarget,'cnf_audit':cnf_audit,'layer_audit':layer_audit,'map_audit':maps,'summary':summary,'input':inp,'members':members};out=f'relay/focused-inspections/{cid}/{run}/adversarial-audit-v4.json';d=(json.dumps(report,sort_keys=True,indent=2)+'\n').encode();body=json.dumps({'message':'Store ZAL 531c adversarial audit v4','content':base64.b64encode(d).decode(),'branch':branch},separators=(',',':')).encode();api(out,method='PUT',data=body);print(json.dumps({'accepted':accepted,'failed':report['failed_checks'],'out':out},sort_keys=True))
+          PY
