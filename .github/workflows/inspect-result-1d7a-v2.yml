@@ -1,0 +1,173 @@
+name: Inspect Result 1d7a v2
+
+on:
+  push:
+    paths:
+      - '.github/workflows/inspect-result-1d7a-v2.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Inspect and audit private ZAL result archive
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, tarfile, urllib.parse, urllib.request, zlib
+
+          token=os.environ['LAB_QUEUE_TOKEN']
+          repo='shengtenghou4-star/00'
+          branch='results'
+          cid='1d7a4b1ee80f4898a7c9f4c9a11af4e2'
+          run='30644078750-1'
+          target_mode='t4:8,8,8,8|7,8,8,8,10'
+          target_inside=[8,8,8,8,7,8,8,8,10]
+
+          def api(path, *, accept='application/vnd.github+json', method='GET', data=None):
+              safe='/'.join(urllib.parse.quote(x,safe='') for x in path.split('/'))
+              url=f'https://api.github.com/repos/{repo}/contents/{safe}'
+              if method=='GET':
+                  url += '?' + urllib.parse.urlencode({'ref':branch})
+              headers={
+                  'Authorization':f'Bearer {token}',
+                  'Accept':accept,
+                  'X-GitHub-Api-Version':'2022-11-28',
+                  'User-Agent':'inspect-result-1d7a-v2'
+              }
+              if data is not None:
+                  headers['Content-Type']='application/json'
+              req=urllib.request.Request(url,data=data,method=method,headers=headers)
+              with urllib.request.urlopen(req,timeout=300) as r:
+                  return r.read()
+
+          prefix=f'relay/results/{cid}/{run}'
+          receipt_env=json.loads(api(f'{prefix}/receipt.json'))
+          receipt=json.loads(base64.b64decode(receipt_env['content']))
+          raw=api(f'{prefix}/result.tar.gz',accept='application/vnd.github.raw+json')
+          archive_sha=hashlib.sha256(raw).hexdigest()
+
+          report={
+              'schema':3,
+              'capsule_id':cid,
+              'run':run,
+              'receipt':receipt,
+              'archive_bytes':len(raw),
+              'archive_sha256':archive_sha,
+              'members':[],
+              'files':{},
+              'parsed_json':{},
+              'map_analysis':{},
+              'checks':{}
+          }
+          report['checks']['receipt_capsule_match']=receipt.get('capsule_id')==cid
+          report['checks']['receipt_run_match']=str(receipt.get('run_id'))==run.split('-')[0] and str(receipt.get('run_attempt'))==run.split('-')[1]
+          report['checks']['archive_size_match']=receipt.get('result_bytes')==len(raw)
+          report['checks']['archive_sha256_match']=receipt.get('result_sha256')==archive_sha
+
+          selected_exact={
+              'output/summary.json','output/input.json','output/payload-files.sha256',
+              'output/retarget-receipt.json','output/original-task.sha256','output/patched-task.sha256',
+              'return-code.txt','engine-payload.sha256','target-input.sha256',
+              'runner.sha256','solver-source-commit.txt','solver-version.txt','stdout.txt','stderr.txt'
+          }
+
+          with tarfile.open(fileobj=io.BytesIO(raw),mode='r:gz') as tf:
+              for m in tf.getmembers():
+                  p=pathlib.PurePosixPath(m.name)
+                  if p.is_absolute() or '..' in p.parts or m.issym() or m.islnk() or m.isdev():
+                      raise SystemExit(f'unsafe archive member: {m.name}')
+                  entry={'name':m.name,'size':m.size,'type':'file' if m.isfile() else 'other'}
+                  if m.isfile():
+                      data=tf.extractfile(m).read()
+                      entry['sha256']=hashlib.sha256(data).hexdigest()
+                      selected=(m.name in selected_exact or m.name.endswith('.solver.summary.json') or
+                                m.name.endswith('.open.map.json.zlib.b64') or m.name.endswith('.audit.json') or
+                                m.name.endswith('.receipt.json'))
+                      if selected and len(data)<=5_000_000:
+                          text=data.decode('utf-8','replace')
+                          report['files'][m.name]={'bytes':len(data),'sha256':entry['sha256'],'content':text}
+                          if m.name.endswith('.json'):
+                              try:
+                                  report['parsed_json'][m.name]=json.loads(text)
+                              except Exception as exc:
+                                  report['parsed_json'][m.name]={'_parse_error':repr(exc)}
+                          if m.name.endswith('.open.map.json.zlib.b64'):
+                              try:
+                                  packed=base64.b64decode(b''.join(data.split()),validate=True)
+                                  decoded=zlib.decompress(packed)
+                                  parsed=json.loads(decoded)
+                                  report['map_analysis'][m.name]={
+                                      'packed_bytes':len(packed),
+                                      'packed_sha256':hashlib.sha256(packed).hexdigest(),
+                                      'decoded_bytes':len(decoded),
+                                      'decoded_sha256':hashlib.sha256(decoded).hexdigest(),
+                                      'json_type':type(parsed).__name__,
+                                      'entries':len(parsed) if hasattr(parsed,'__len__') else None
+                                  }
+                              except Exception as exc:
+                                  report['map_analysis'][m.name]={'error':repr(exc)}
+                  report['members'].append(entry)
+
+          parsed=report['parsed_json']
+          inp=parsed.get('output/input.json',{})
+          summary=parsed.get('output/summary.json',{})
+          retarget=parsed.get('output/retarget-receipt.json',{})
+          report['checks']['input_schema_match']=inp.get('schema')=='profile37-target-input/v1'
+          report['checks']['input_mode_match']=inp.get('mode')==target_mode
+          report['checks']['input_inside_match']=inp.get('inside')==target_inside
+          report['checks']['summary_inside_match']=summary.get('inside')==target_inside
+          report['checks']['summary_t_match']=summary.get('t')==4
+          report['checks']['summary_profile_match']=summary.get('profile')==([9]+[8]*13+[7]*2+[6])
+          if retarget:
+              report['checks']['retarget_target_match']=(retarget.get('target_inside')==target_inside or retarget.get('patched_inside')==target_inside)
+              report['checks']['retarget_single_anchor']=retarget.get('replacement_count')==1
+          else:
+              report['checks']['retarget_target_match']=False
+              report['checks']['retarget_single_anchor']=False
+
+          rc_text=report['files'].get('return-code.txt',{}).get('content','').strip()
+          report['checks']['wrapper_return_code_zero']=rc_text=='0'
+
+          solver_checks={}
+          for name,obj in parsed.items():
+              if not name.endswith('.solver.summary.json') or not isinstance(obj,dict):
+                  continue
+              inp_n=obj.get('input'); unsat=obj.get('unsat',0); sat=obj.get('sat',0); open_n=obj.get('open',0)
+              solver_checks[name]={
+                  'accounting': isinstance(inp_n,int) and inp_n==unsat+sat+open_n,
+                  'sat_zero': sat==0,
+                  'exit_code': obj.get('exit_code'),
+                  'input':inp_n,'unsat':unsat,'sat':sat,'open':open_n
+              }
+          report['solver_checks']=solver_checks
+
+          summary_sat=summary.get('sat')
+          final_open=None
+          layers=summary.get('layers',{}) if isinstance(summary,dict) else {}
+          if isinstance(layers,dict) and layers:
+              ordered=[x for x in ('seventh','sixth','fifth','fourth','third') if x in layers]
+              if ordered:
+                  final_open=layers[ordered[0]].get('survivors')
+          report['checks']['summary_sat_zero']=summary_sat==0
+          report['checks']['final_open_zero']=final_open==0
+          report['derived']={'summary_sat':summary_sat,'final_open':final_open,'layer_names':list(layers.keys()) if isinstance(layers,dict) else []}
+
+          report['checks']['all_core_identity_checks']=all(report['checks'].get(k) is True for k in (
+              'receipt_capsule_match','receipt_run_match','archive_size_match','archive_sha256_match',
+              'input_schema_match','input_mode_match','input_inside_match','summary_inside_match','summary_t_match',
+              'summary_profile_match','retarget_target_match','retarget_single_anchor','wrapper_return_code_zero'
+          ))
+
+          payload=(json.dumps(report,sort_keys=True,indent=2)+'\n').encode()
+          out=f'relay/focused-inspections/{cid}/{run}/inspection-v3.json'
+          body=json.dumps({'message':'Store corrected ZAL focused result inspection','content':base64.b64encode(payload).decode(),'branch':branch},separators=(',',':')).encode()
+          api(out,method='PUT',data=body)
+          print(json.dumps({'out':out,'bytes':len(payload),'checks':report['checks']},sort_keys=True))
+          PY
