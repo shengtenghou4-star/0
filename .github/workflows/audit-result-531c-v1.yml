@@ -102,7 +102,12 @@ jobs:
           checks['terminal']=prev==0
           maps={}; maps_ok=True
           for lname in ordered:
-              name=f'output/{lname}.open.map.json.zlib.b64'; encoded=files[name]; packed=base64.b64decode(b''.join(encoded.split()),validate=True); decoded=zlib.decompress(packed); obj=json.loads(decoded); top=summary[f'{lname}_open_map']
+              name=f'output/{lname}.open.map.json.zlib.b64'; encoded=files[name]; packed=base64.b64decode(b''.join(encoded.split()),validate=True); decoded=zlib.decompress(packed); text=decoded.decode('utf-8')
+              if not text.strip(): obj=[]
+              else:
+                  try: obj=json.loads(text)
+                  except json.JSONDecodeError: obj=[json.loads(line) for line in text.splitlines() if line.strip()]
+              top=summary[f'{lname}_open_map']
               ok=hashlib.sha256(encoded).hexdigest()==top['encoded_sha256'] and hashlib.sha256(decoded).hexdigest()==top['decoded_sha256'] and len(obj)==top['entries']==layers[lname]['survivors']
               maps_ok &= ok; maps[lname]={'ok':ok,'entries':len(obj),'encoded_sha256':hashlib.sha256(encoded).hexdigest(),'decoded_sha256':hashlib.sha256(decoded).hexdigest()}
           checks['maps']=maps_ok
