@@ -1,0 +1,119 @@
+name: Audit Result 1d7a v6
+
+on:
+  push:
+    paths:
+      - '.github/workflows/audit-result-1d7a-v6.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Audit corrected ZAL result archive
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, tarfile, urllib.parse, urllib.request, zlib
+
+          token=os.environ['LAB_QUEUE_TOKEN']; repo='shengtenghou4-star/00'; branch='results'
+          cid='1d7a4b1ee80f4898a7c9f4c9a11af4e2'; run='30644078750-1'
+          target=[8,8,8,8,7,8,8,8,10]; old=[8,8,9,9,7,8,8,8,9]
+          expected_engine='8e47fe6a0738c37c3107c46e1a8b8815'
+          expected_engine_sha='c219e70ec357f8ba0cb34eb82c7d1d51406f7b823728f18818d93ff2118d13d3'
+          expected_runner_source_sha='d57e79c6475fb2fcbeeb3298276660c712167c96f9c507f152a013a522b3cc7c'
+
+          def api(path, *, accept='application/vnd.github+json', method='GET', data=None):
+              safe='/'.join(urllib.parse.quote(x,safe='') for x in path.split('/'))
+              url=f'https://api.github.com/repos/{repo}/contents/{safe}'
+              if method=='GET': url += '?' + urllib.parse.urlencode({'ref':branch})
+              headers={'Authorization':f'Bearer {token}','Accept':accept,'X-GitHub-Api-Version':'2022-11-28','User-Agent':'audit-result-1d7a-v6'}
+              if data is not None: headers['Content-Type']='application/json'
+              req=urllib.request.Request(url,data=data,method=method,headers=headers)
+              with urllib.request.urlopen(req,timeout=300) as r: return r.read()
+
+          prefix=f'relay/results/{cid}/{run}'
+          rec_env=json.loads(api(f'{prefix}/receipt.json')); receipt=json.loads(base64.b64decode(rec_env['content']))
+          raw=api(f'{prefix}/result.tar.gz',accept='application/vnd.github.raw+json')
+          files={}; members=[]
+          with tarfile.open(fileobj=io.BytesIO(raw),mode='r:gz') as tf:
+              for m in tf.getmembers():
+                  p=pathlib.PurePosixPath(m.name)
+                  if p.is_absolute() or '..' in p.parts or m.issym() or m.islnk() or m.isdev(): raise SystemExit('unsafe archive')
+                  meta={'name':m.name,'size':m.size,'type':'file' if m.isfile() else 'other'}
+                  if m.isfile():
+                      data=tf.extractfile(m).read(); files[m.name]=data; meta['sha256']=hashlib.sha256(data).hexdigest()
+                  members.append(meta)
+          def txt(n): return files[n].decode('utf-8','strict')
+          def js(n): return json.loads(txt(n))
+
+          inp=js('output/input.json'); summary=js('output/summary.json'); retarget=js('retarget-receipt.json')
+          checks={
+            'receipt_capsule': receipt.get('capsule_id')==cid,
+            'receipt_run': str(receipt.get('run_id'))=='30644078750' and str(receipt.get('run_attempt'))=='1',
+            'archive_bytes': receipt.get('result_bytes')==len(raw),
+            'archive_sha': receipt.get('result_sha256')==hashlib.sha256(raw).hexdigest(),
+            'return_codes': receipt.get('return_code')==0 and txt('return-code.txt').strip()=='0',
+            'input_target': inp.get('schema')=='profile37-target-input/v1' and inp.get('mode')=='t4:8,8,8,8|7,8,8,8,10' and inp.get('inside')==target,
+            'summary_target': summary.get('t')==4 and summary.get('inside')==target and summary.get('profile')==([9]+[8]*13+[7]*2+[6]),
+            'summary_sat_zero': summary.get('sat')==0,
+            'retarget_identity': retarget.get('schema')=='opaque-engine-retarget/v1' and retarget.get('engine_capsule')==expected_engine and retarget.get('engine_payload_sha256')==expected_engine_sha,
+            'retarget_vectors': retarget.get('old_inside')==old and retarget.get('new_inside')==target and retarget.get('max_layer')==7,
+            'retarget_rule': retarget.get('patch_rule')=='single exact source-anchor substitution; all other engine code unchanged',
+            'retarget_hash_changed': retarget.get('original_task_sha256')!=retarget.get('patched_task_sha256')
+          }
+          payload={}
+          for line in txt('output/payload-files.sha256').splitlines():
+              if line.strip():
+                  h,p=line.split(None,1); payload[p.strip()]=h
+          input_sha=hashlib.sha256(files['output/input.json']).hexdigest()
+          checks['payload_bindings']=payload.get('/tmp/capsule/input.json')==input_sha==retarget.get('target_input_sha256') and payload.get('/tmp/capsule/task.py')==retarget.get('patched_task_sha256') and payload.get('/tmp/capsule/runner.cpp')==expected_runner_source_sha
+          checks['solver_receipts']=len(txt('solver-source-commit.txt').strip())==40 and bool(txt('solver-version.txt').strip()) and len(txt('runner.sha256').strip().split()[0])==64
+
+          cnf_name=next(n for n in files if n.endswith('base.cnf')); cnf=files[cnf_name]; cnf_sha=hashlib.sha256(cnf).hexdigest(); dv=dc=None; zeros=0
+          for raw_line in cnf.splitlines():
+              line=raw_line.strip()
+              if not line or line.startswith(b'c'): continue
+              if line.startswith(b'p '):
+                  parts=line.split(); dv=int(parts[2]); dc=int(parts[3])
+              else: zeros += sum(tok==b'0' for tok in line.split())
+          sc=summary['cnf']; checks['cnf_binding']=sc.get('sha256')==cnf_sha and sc.get('variables')==dv and sc.get('clauses')==dc==zeros
+          cnf_audit={'name':cnf_name,'sha256':cnf_sha,'variables':dv,'declared_clauses':dc,'counted_clauses':zeros}
+
+          layers=summary['layers']; ordered=[x for x in ('third','fourth','fifth','sixth','seventh') if x in layers]
+          layer_audit={}; prev=None; layers_ok=True
+          for lname in ordered:
+              L=layers[lname]; V=L['v4']; S=L['solver']
+              if lname=='third': ordinary_ok=L.get('exact_orbits')==V.get('input')
+              else:
+                  O=L['ordinary']; rejected=sum(v for k,v in O.items() if k not in {'raw','parents','ordinary_retained'} and isinstance(v,int)); ordinary_ok=O['raw']==O['ordinary_retained']+rejected and O['parents']==prev
+              v4_sum=sum(v for d in V.get('per_k',{}).values() for v in d.values())
+              v4_ok=V['input']==V['rejected']+V['retained'] and V['rejected']==v4_sum and V['retained']==S['input']
+              solver_ok=S['input']==S['unsat']+S['sat']+S['open'] and S['unsat']==sum(S['unsat_by_budget'].values()) and L['survivors']==S['open'] and S['sat']==0 and ((S['open']==0 and S['exit_code']==20) or (S['open']>0 and S['exit_code']==0))
+              ok=ordinary_ok and v4_ok and solver_ok; layers_ok &= ok; prev=S['open']
+              layer_audit[lname]={'ok':ok,'ordinary_ok':ordinary_ok,'v4_ok':v4_ok,'solver_ok':solver_ok,'exact_orbits':L.get('exact_orbits'),'raw':L.get('ordinary',{}).get('raw'),'v4_input':V.get('input'),'v4_rejected':V.get('rejected'),'solver_input':S.get('input'),'unsat':S.get('unsat'),'sat':S.get('sat'),'open':S.get('open')}
+          checks['layer_sequence']=ordered==['third','fourth','fifth']
+          checks['layer_accounting']=layers_ok
+          checks['terminal']=prev==0
+
+          maps={}; maps_ok=True
+          for lname in ordered:
+              name=f'output/{lname}.open.map.json.zlib.b64'; encoded=files[name]; packed=base64.b64decode(b''.join(encoded.split()),validate=True); decoded=zlib.decompress(packed); obj=json.loads(decoded); top=summary[f'{lname}_open_map']
+              ok=hashlib.sha256(encoded).hexdigest()==top['encoded_sha256'] and hashlib.sha256(decoded).hexdigest()==top['decoded_sha256'] and len(obj)==top['entries']==layers[lname]['survivors']
+              maps_ok &= ok; maps[lname]={'ok':ok,'entries':len(obj),'encoded_sha256':hashlib.sha256(encoded).hexdigest(),'decoded_sha256':hashlib.sha256(decoded).hexdigest()}
+          checks['maps']=maps_ok
+
+          accepted=all(checks.values())
+          report={'schema':'profile37-corrected-result-adversarial-audit/v3','capsule_id':cid,'run':run,'mode':'t4:8,8,8,8|7,8,8,8,10','accepted':accepted,'decision':'ACCEPT_TERMINAL_UNSAT' if accepted else 'HOLD_NO_PROOF_CREDIT','failed_checks':[k for k,v in checks.items() if not v],'checks':checks,'receipt':receipt,'archive_bytes':len(raw),'archive_sha256':hashlib.sha256(raw).hexdigest(),'retarget_receipt':retarget,'cnf_audit':cnf_audit,'layer_audit':layer_audit,'map_audit':maps,'summary':summary,'input':inp,'members':members}
+          payload_out=(json.dumps(report,sort_keys=True,indent=2)+'\n').encode()
+          out=f'relay/focused-inspections/{cid}/{run}/adversarial-audit-v3.json'
+          body=json.dumps({'message':'Store corrected ZAL adversarial audit v3','content':base64.b64encode(payload_out).decode(),'branch':branch},separators=(',',':')).encode()
+          api(out,method='PUT',data=body)
+          print(json.dumps({'accepted':accepted,'failed':report['failed_checks'],'out':out},sort_keys=True))
+          PY
