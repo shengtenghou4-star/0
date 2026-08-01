@@ -1,3 +1,4 @@
+# refresh 2026-08-01T14:13Z
 name: Status ZAL Outside Split
 
 on:
@@ -27,10 +28,7 @@ jobs:
           runs_url='https://api.github.com/repos/shengtenghou4-star/0/actions/workflows/matrix-zal-outsplit-7a8f.yml/runs?per_page=5'
           with urllib.request.urlopen(urllib.request.Request(runs_url,headers=headers),timeout=120) as r:
               data=json.load(r)
-          out={'schema':1,'workflow':'matrix-zal-outsplit-7a8f.yml','runs':[
-              {'id':x['id'],'status':x['status'],'conclusion':x['conclusion'],'run_number':x['run_number'],'head_sha':x['head_sha'],'created_at':x['created_at'],'updated_at':x['updated_at'],'html_url':x['html_url']}
-              for x in data.get('workflow_runs',[])
-          ]}
+          out={'schema':1,'workflow':'matrix-zal-outsplit-7a8f.yml','runs':[{'id':x['id'],'status':x['status'],'conclusion':x['conclusion'],'run_number':x['run_number'],'head_sha':x['head_sha'],'created_at':x['created_at'],'updated_at':x['updated_at'],'html_url':x['html_url']} for x in data.get('workflow_runs',[])]}
           payload=(json.dumps(out,indent=2,sort_keys=True)+'\n').encode()
           path='status/zal-outsplit.json'
           url=f'https://api.github.com/repos/shengtenghou4-star/0/contents/{path}'
