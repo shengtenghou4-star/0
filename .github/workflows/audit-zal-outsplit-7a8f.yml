@@ -1,0 +1,114 @@
+name: Audit ZAL Outside Split 7a8f
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/audit-zal-outsplit-7a8f.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Recover and adversarially audit private result
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          REQUEST_ID: 7a8f0d51de9c4b72a630f184c2e5d9b7
+          SOURCE_RUN: 30703350166-1
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, tarfile, urllib.parse, urllib.request
+
+          token=os.environ['LAB_QUEUE_TOKEN']; request=os.environ['REQUEST_ID']; source_run=os.environ['SOURCE_RUN']
+          repo='shengtenghou4-star/00'; branch='results'
+          def fetch(path):
+              q=urllib.parse.urlencode({'ref':branch})
+              req=urllib.request.Request(
+                  f'https://api.github.com/repos/{repo}/contents/{path}?{q}',
+                  headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'audit-zal-outsplit-7a8f'})
+              with urllib.request.urlopen(req,timeout=180) as r: env=json.load(r)
+              return base64.b64decode(env['content'])
+          prefix=f'relay/results/{request}/{source_run}'
+          receipt_bytes=fetch(f'{prefix}/receipt.json'); receipt=json.loads(receipt_bytes)
+          package=fetch(f'{prefix}/result.tar.gz')
+          failures=[]
+          if hashlib.sha256(package).hexdigest()!=receipt.get('result_sha256'): failures.append('package_sha256_mismatch')
+          if receipt.get('return_code')!=0: failures.append('nonzero_return_code')
+          if receipt.get('capsule_id')!=request: failures.append('capsule_id_mismatch')
+          root=pathlib.Path('/tmp/audit'); root.mkdir()
+          with tarfile.open(fileobj=io.BytesIO(package),mode='r:gz') as tf:
+              for m in tf.getmembers():
+                  p=pathlib.Path(m.name)
+                  if p.is_absolute() or '..' in p.parts or m.issym() or m.islnk() or m.isdev(): raise SystemExit('unsafe archive')
+              tf.extractall(root,filter='data')
+          files=sorted(str(p.relative_to(root)) for p in root.rglob('*') if p.is_file())
+          def load(rel):
+              p=root/rel
+              return json.loads(p.read_text()) if p.exists() else None
+          inp=load('input.json'); source=load('source-recovery-receipt.json'); manifest=load('split/cover-manifest.json')
+          if not inp: failures.append('missing_input')
+          else:
+              if inp.get('mode')!='t4:7,8,8,8|8,8,8,8,9': failures.append('target_mode_mismatch')
+              if inp.get('inside')!=[7,8,8,8,8,8,8,8,9]: failures.append('inside_vector_mismatch')
+              if inp.get('expected_symmetry_patterns')!=30: failures.append('expected_pattern_count_mismatch')
+          if not source: failures.append('missing_source_recovery_receipt')
+          else:
+              if source.get('request_id')!=request: failures.append('source_request_mismatch')
+              if source.get('authority_source_commit')!='ea2075275ff2a5ec1a46308b8f1d3115c2579749': failures.append('authority_source_commit_mismatch')
+              if source.get('private_queue_commit')!='14f5abf10dfa0483c72334353e7816e536e8db6e': failures.append('private_queue_commit_mismatch')
+          unit=(root/'unit-tests.log').read_text(errors='replace') if (root/'unit-tests.log').exists() else ''
+          if 'Ran 3 tests' not in unit or '\nOK' not in unit: failures.append('unit_test_transcript_not_pass')
+          case_reports=[]
+          for p in sorted((root/'split').rglob('report.json')) if (root/'split').exists() else []:
+              try: case_reports.append((str(p.relative_to(root/'split')),json.loads(p.read_text())))
+              except Exception: failures.append(f'invalid_json:{p.name}')
+          pattern_keys=[]; statuses={}; cnf_pairs=[]
+          for rel,row in case_reports:
+              key=row.get('outside_degree_pattern') or row.get('pattern') or row.get('outside_degrees') or rel.split('/')[0]
+              pattern_keys.append(json.dumps(key,sort_keys=True))
+              status=row.get('status') or row.get('solver_status') or row.get('verdict') or 'MISSING'
+              statuses[status]=statuses.get(status,0)+1
+              cnf_pairs.append((row.get('variables'),row.get('clauses'),row.get('cnf_sha256')))
+          duplicate_patterns=len(pattern_keys)-len(set(pattern_keys))
+          if duplicate_patterns: failures.append('duplicate_pattern_reports')
+          if len(case_reports)!=30: failures.append(f'case_report_count_{len(case_reports)}_not_30')
+          if not manifest: failures.append('missing_cover_manifest')
+          else:
+              declared=manifest.get('patterns') or manifest.get('total_patterns') or manifest.get('case_count')
+              if declared not in (None,30): failures.append(f'manifest_pattern_count_{declared}_not_30')
+          open_like=sum(v for k,v in statuses.items() if str(k).upper() not in ('UNSAT','20','STATUS_20'))
+          sat_like=sum(v for k,v in statuses.items() if 'SAT' in str(k).upper() and 'UNSAT' not in str(k).upper())
+          missing_cnf=sum(1 for v,c,h in cnf_pairs if not isinstance(v,int) or not isinstance(c,int) or not isinstance(h,str) or len(h)!=64)
+          if missing_cnf: failures.append(f'missing_cnf_metadata_{missing_cnf}')
+          cover_verdict=receipt.get('cover_verdict')
+          terminal_accepted=(not failures and len(case_reports)==30 and open_like==0 and sat_like==0 and cover_verdict=='COMPLETE_UNSAT')
+          decision='ACCEPT_TERMINAL_UNSAT' if terminal_accepted else 'REJECT_NO_PROOF_CREDIT'
+          audit={
+            'schema':'profile37-outside-split-adversarial-audit/v1',
+            'request_id':request,'source_run':source_run,'package_sha256':hashlib.sha256(package).hexdigest(),
+            'target':inp,'source_recovery':source,'files':files,
+            'unit_tests_pass':('Ran 3 tests' in unit and '\nOK' in unit),
+            'case_report_count':len(case_reports),'unique_pattern_reports':len(set(pattern_keys)),
+            'duplicate_pattern_reports':duplicate_patterns,'status_counts':statuses,
+            'open_like_count':open_like,'sat_like_count':sat_like,'missing_cnf_metadata_count':missing_cnf,
+            'receipt_cover_verdict':cover_verdict,'manifest':manifest,'failures':failures,
+            'decision':decision,'global_checkpoint_increment':1 if terminal_accepted else 0,
+            'proof_rule':'Any missing case, duplicate case, SAT, timeout, unknown/status-0, target mismatch, binding mismatch or missing CNF metadata receives no terminal credit.'
+          }
+          payload=(json.dumps(audit,indent=2,sort_keys=True)+'\n').encode()
+          path=f'relay/focused-inspections/{request}/{source_run}/adversarial-audit-v1.json'
+          body=json.dumps({'message':'Store ZAL outside-split adversarial audit','content':base64.b64encode(payload).decode(),'branch':branch},separators=(',',':')).encode()
+          req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}',data=body,method='PUT',headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'audit-zal-outsplit-7a8f'})
+          with urllib.request.urlopen(req,timeout=180) as r: r.read()
+          print(json.dumps({'decision':decision,'case_report_count':len(case_reports),'status_counts':statuses,'failures':failures},sort_keys=True))
+          PY
