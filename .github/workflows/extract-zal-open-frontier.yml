@@ -1,0 +1,66 @@
+name: Extract ZAL open outside-degree frontier
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/extract-zal-open-frontier.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Extract compact verified frontier
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, json, os, urllib.parse, urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; repo='shengtenghou4-star/00'; branch='results'
+          request='7a8f0d51de9c4b72a630f184c2e5d9b7'; run='30703350166-1'
+          src=f'relay/focused-inspections/{request}/{run}/inspection-r2.json'
+          def fetch(path):
+              q=urllib.parse.urlencode({'ref':branch})
+              req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}?{q}',headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'extract-zal-frontier'})
+              with urllib.request.urlopen(req,timeout=300) as r: env=json.load(r)
+              return base64.b64decode(env['content'])
+          raw=fetch(src); audit=json.loads(raw)
+          open_rows=[r for r in audit['reports'] if r['status'] not in ('SAT','UNSAT')]
+          unsat_rows=[r for r in audit['reports'] if r['status']=='UNSAT']
+          open_rows.sort(key=lambda r:r['directory']); unsat_rows.sort(key=lambda r:r['directory'])
+          frontier={
+            'schema':'profile37-outside-degree-open-frontier/v1',
+            'mode':'t4:7,8,8,8|8,8,8,8,9',
+            'inside':[7,8,8,8,8,8,8,8,9],
+            'source_request_id':request,
+            'source_run_attempt':run,
+            'source_package_sha256':audit['package_sha256'],
+            'source_inspection_sha256':hashlib.sha256(raw).hexdigest(),
+            'complete_cover_pattern_count':audit['expected_pattern_count'],
+            'complete_cover_patterns_sha256':audit['expected_patterns_sha256'],
+            'unique_directory_count':audit['unique_directory_count'],
+            'unique_payload_pattern_count':audit['unique_payload_pattern_count'],
+            'directory_payload_binding_failures':audit['directory_payload_binding_failures'],
+            'duplicate_report_sha_groups':audit['duplicate_report_sha_groups'],
+            'duplicate_cnf_sha_groups':audit['duplicate_cnf_sha_groups'],
+            'unit_test_log_issue':'empty because unittest wrote to stderr while tee captured stdout only; completed workflow log independently records Ran 3 tests and OK',
+            'accepted_partial_status':'15 explicit solver exit-code-20 cases are reusable only as case-level evidence after independent hash/binding audit; the mode remains open',
+            'unsat_case_count':len(unsat_rows),
+            'open_case_count':len(open_rows),
+            'unsat_cases':unsat_rows,
+            'open_cases':open_rows,
+            'global_checkpoint_increment':0,
+            'paper_version':'v1.6'
+          }
+          out=(json.dumps(frontier,indent=2,sort_keys=True)+'\n').encode()
+          path=f'relay/focused-inspections/{request}/{run}/open-frontier-v1.json'
+          body=json.dumps({'message':'Store ZAL open outside-degree frontier','content':base64.b64encode(out).decode(),'branch':branch},separators=(',',':')).encode()
+          req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}',data=body,method='PUT',headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'extract-zal-frontier'})
+          with urllib.request.urlopen(req,timeout=300) as r:r.read()
+          print(json.dumps({'unsat':len(unsat_rows),'open':len(open_rows),'unique_patterns':audit['unique_payload_pattern_count']},sort_keys=True))
+          PY
