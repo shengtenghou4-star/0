@@ -1,0 +1,296 @@
+name: Matrix ZAL outside split resume v1
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/matrix-zal-outsplit-resume-v1.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: matrix-zal-outsplit-resume-v1
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      REQUEST_ID: 7a8f5e7c2a4d4b3e9f1a6c8d0e2f4b61
+      QUEUE_COMMIT: b6bb9a8697e115f9491700a5d603ee6e421529d0
+      SHARD_INDEX: ${{ matrix.shard }}
+      SHARD_COUNT: 3
+      TIMEOUT_PER_CASE: 3600
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Recover bound sources and frontier
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/zalsplit /tmp/result
+          python - <<'PY'
+          import base64, hashlib, json, os, pathlib, urllib.parse, urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; request=os.environ['REQUEST_ID']; ref=os.environ['QUEUE_COMMIT']
+          repo='shengtenghou4-star/00'; root=pathlib.Path('/tmp/zalsplit')
+          def fetch(path, branch):
+              q=urllib.parse.urlencode({'ref':branch})
+              req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}?{q}',headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'matrix-zal-resume'})
+              with urllib.request.urlopen(req,timeout=300) as r: env=json.load(r)
+              return base64.b64decode(env['content'])
+          def blob(data):
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          prefix=f'relay/requests/{request}'
+          input_raw=fetch(f'{prefix}/input.json',ref); request_data=json.loads(input_raw)
+          if request_data.get('mode')!='t4:7,8,8,8|8,8,8,8,9': raise SystemExit('request mode mismatch')
+          if request_data.get('inside')!=[7,8,8,8,8,8,8,8,9]: raise SystemExit('request inside mismatch')
+          expected={
+            'profile37_outside_degree_bound_case.py':'1d9e96048c28da717b295db0740e0b4983006d32',
+            'profile37_outside_degree_resume_shard.py':'0ff5648d54838005f45b9db5a5db942b1921a369',
+            'test_profile37_outside_degree_resume.py':'b4ad0336dae5b9015f930808ab0ffcb72e95f154',
+          }
+          recovered={}
+          for name,want in expected.items():
+              data=fetch(f'{prefix}/{name}',ref); got=blob(data)
+              if got!=want: raise SystemExit(f'queue source mismatch {name}: {got} != {want}')
+              (root/name).write_bytes(data); recovered[name]=got
+          builder_path='relay/requests/7a8f0d51de9c4b72a630f184c2e5d9b7/profile37_outside_degree_split_cnf.py'
+          builder=fetch(builder_path,ref); builder_blob=blob(builder)
+          if builder_blob!='58e21a354e2c22dfa9f5404d6f7c048f5877ef4f': raise SystemExit('builder blob mismatch')
+          (root/'profile37_outside_degree_split_cnf.py').write_bytes(builder)
+          frontier_path=request_data['frontier_path']; frontier=fetch(frontier_path,request_data['frontier_ref']); frontier_blob=blob(frontier)
+          if frontier_blob!=request_data['frontier_git_blob']: raise SystemExit('frontier blob mismatch')
+          (root/'open-frontier-v1.json').write_bytes(frontier)
+          (root/'input.json').write_bytes(input_raw)
+          receipt={
+            'schema':'profile37-outside-degree-resume-source-recovery/v1',
+            'request_id':request,
+            'queue_commit':ref,
+            'request_input_sha256':hashlib.sha256(input_raw).hexdigest(),
+            'queue_source_git_blobs':recovered,
+            'builder_git_blob':builder_blob,
+            'frontier_git_blob':frontier_blob,
+            'frontier_sha256':hashlib.sha256(frontier).hexdigest(),
+          }
+          (root/'source-recovery-receipt.json').write_text(json.dumps(receipt,indent=2,sort_keys=True)+'\n')
+          PY
+
+      - name: Run deterministic contract tests
+        shell: bash
+        run: |
+          set +e
+          cd /tmp/zalsplit
+          python -m unittest -v test_profile37_outside_degree_resume.py 2>&1 | tee /tmp/result/unit-tests.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          TEST_RC="$rc" python - <<'PY'
+          import hashlib, json, os, pathlib
+          path=pathlib.Path('/tmp/result/unit-tests.log'); raw=path.read_bytes()
+          text=raw.decode(errors='replace'); rc=int(os.environ['TEST_RC'])
+          receipt={
+            'schema':'profile37-deterministic-test-receipt/v1',
+            'exit_code':rc,
+            'transcript_bytes':len(raw),
+            'transcript_sha256':hashlib.sha256(raw).hexdigest(),
+            'contains_ran_3_tests':'Ran 3 tests' in text,
+            'contains_ok':'OK' in text,
+          }
+          receipt['pass']=rc==0 and receipt['contains_ran_3_tests'] and receipt['contains_ok']
+          pathlib.Path('/tmp/result/unit-test-receipt.json').write_text(json.dumps(receipt,indent=2,sort_keys=True)+'\n')
+          if not receipt['pass']: raise SystemExit('deterministic test contract failed')
+          PY
+
+      - name: Build recorded CaDiCaL solver
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/arminbiere/cadical.git /tmp/cadical >/dev/null 2>&1
+          git -C /tmp/cadical rev-parse HEAD > /tmp/result/solver-source-commit.txt
+          cd /tmp/cadical
+          ./configure >/dev/null
+          make -j2 >/dev/null
+          /tmp/cadical/build/cadical --version > /tmp/result/solver-version.txt
+          sha256sum /tmp/cadical/build/cadical > /tmp/result/solver.sha256
+
+      - name: Execute bounded exact shard
+        shell: bash
+        run: |
+          set +e
+          mkdir -p /tmp/result/shard
+          timeout --signal=TERM 20400 python /tmp/zalsplit/profile37_outside_degree_resume_shard.py \
+            --frontier /tmp/zalsplit/open-frontier-v1.json \
+            --case-script /tmp/zalsplit/profile37_outside_degree_bound_case.py \
+            --solver /tmp/cadical/build/cadical \
+            --workdir /tmp/result/shard \
+            --shard-index "$SHARD_INDEX" \
+            --shard-count "$SHARD_COUNT" \
+            --timeout-per-case "$TIMEOUT_PER_CASE" \
+            > /tmp/result/shard.stdout.txt 2> /tmp/result/shard.stderr.txt
+          rc=$?
+          printf '%s\n' "$rc" > /tmp/result/return-code.txt
+          cp /tmp/zalsplit/input.json /tmp/result/
+          cp /tmp/zalsplit/source-recovery-receipt.json /tmp/result/
+          exit 0
+
+      - name: Store private shard result
+        if: always()
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, tarfile, time, urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; request=os.environ['REQUEST_ID']; run=os.environ['RUN_ID']; attempt=os.environ['RUN_ATTEMPT']; shard=os.environ['SHARD_INDEX']
+          repo='shengtenghou4-star/00'; branch='results'; root=pathlib.Path('/tmp/result')
+          stream=io.BytesIO()
+          with tarfile.open(fileobj=stream,mode='w:gz',format=tarfile.PAX_FORMAT) as tf:
+              for p in sorted(root.rglob('*')):
+                  if p.is_symlink(): raise SystemExit('unsafe result')
+                  tf.add(p,arcname=p.relative_to(root),recursive=False)
+          package=stream.getvalue()
+          if len(package)>90*1024*1024: raise SystemExit(f'result too large: {len(package)}')
+          rc=int((root/'return-code.txt').read_text().strip()) if (root/'return-code.txt').exists() else 255
+          manifest_path=root/'shard'/'shard-manifest.json'; verdict=None
+          if manifest_path.exists(): verdict=json.loads(manifest_path.read_text()).get('verdict')
+          test_path=root/'unit-test-receipt.json'; test_pass=False
+          if test_path.exists(): test_pass=bool(json.loads(test_path.read_text()).get('pass'))
+          receipt={
+            'schema':'profile37-outside-degree-resume-shard-archive/v1',
+            'request_id':request,'run_id':run,'run_attempt':attempt,'shard_index':int(shard),
+            'return_code':rc,'result_bytes':len(package),'result_sha256':hashlib.sha256(package).hexdigest(),
+            'shard_verdict':verdict,'deterministic_tests_pass':test_pass,'finished_unix':int(time.time())
+          }
+          def put(path,data,message):
+              body=json.dumps({'message':message,'content':base64.b64encode(data).decode(),'branch':branch},separators=(',',':')).encode()
+              req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}',data=body,method='PUT',headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'matrix-zal-resume'})
+              with urllib.request.urlopen(req,timeout=300) as r:r.read()
+          prefix=f'relay/results/{request}/{run}-{attempt}/shard-{shard}'
+          put(f'{prefix}/result.tar.gz',package,'Store bounded ZAL shard package')
+          put(f'{prefix}/receipt.json',(json.dumps(receipt,indent=2,sort_keys=True)+'\n').encode(),'Store bounded ZAL shard receipt')
+          print(json.dumps(receipt,sort_keys=True))
+          PY
+
+  merge:
+    if: always()
+    needs: execute
+    runs-on: ubuntu-24.04
+    env:
+      REQUEST_ID: 7a8f5e7c2a4d4b3e9f1a6c8d0e2f4b61
+      RUN_ID: ${{ github.run_id }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - name: Merge and audit exact shard cover
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, tarfile, urllib.parse, urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; request=os.environ['REQUEST_ID']; run=os.environ['RUN_ID']; attempt=os.environ['RUN_ATTEMPT']
+          repo='shengtenghou4-star/00'; branch='results'
+          def fetch(path,ref=branch):
+              q=urllib.parse.urlencode({'ref':ref})
+              req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}?{q}',headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'merge-zal-resume'})
+              with urllib.request.urlopen(req,timeout=300) as r: env=json.load(r)
+              return base64.b64decode(env['content'])
+          def blob(data):
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          frontier_path='relay/focused-inspections/7a8f0d51de9c4b72a630f184c2e5d9b7/30703350166-1/open-frontier-v1.json'
+          frontier_raw=fetch(frontier_path); frontier=json.loads(frontier_raw)
+          if blob(frontier_raw)!='d8407d78795835cbdfe80737cf7b646561af8b91': raise SystemExit('frontier blob mismatch in merger')
+          expected_open=sorted(row['directory'] for row in frontier['open_cases'])
+          shard_records=[]; missing_shards=[]
+          for shard in range(3):
+              prefix=f'relay/results/{request}/{run}-{attempt}/shard-{shard}'
+              try:
+                  receipt=json.loads(fetch(f'{prefix}/receipt.json'))
+                  package=fetch(f'{prefix}/result.tar.gz')
+              except Exception as exc:
+                  missing_shards.append({'shard':shard,'error':type(exc).__name__})
+                  continue
+              if hashlib.sha256(package).hexdigest()!=receipt['result_sha256']:
+                  raise SystemExit(f'shard {shard} package digest mismatch')
+              root=pathlib.Path(f'/tmp/shard-{shard}'); root.mkdir()
+              with tarfile.open(fileobj=io.BytesIO(package),mode='r:gz') as tf:
+                  for m in tf.getmembers():
+                      p=pathlib.PurePosixPath(m.name)
+                      if p.is_absolute() or '..' in p.parts or m.issym() or m.islnk() or m.isdev(): raise SystemExit('unsafe shard package')
+                  tf.extractall(root,filter='data')
+              manifest_path=root/'shard'/'shard-manifest.json'; test_path=root/'unit-test-receipt.json'
+              if not manifest_path.exists() or not test_path.exists():
+                  missing_shards.append({'shard':shard,'error':'missing_manifest_or_test_receipt'})
+                  continue
+              manifest=json.loads(manifest_path.read_text()); test=json.loads(test_path.read_text())
+              shard_records.append({'receipt':receipt,'manifest':manifest,'test_receipt':test})
+          selected=[]; unsat=[]; sat=[]; open_cases=[]; binding_failures=[]; tests_pass=True; shard_contract_failures=[]
+          for record in shard_records:
+              manifest=record['manifest']; receipt=record['receipt']; test=record['test_receipt']
+              tests_pass=tests_pass and test.get('pass') is True and receipt.get('deterministic_tests_pass') is True
+              if manifest.get('frontier_git_blob')!='d8407d78795835cbdfe80737cf7b646561af8b91': shard_contract_failures.append('frontier')
+              if manifest.get('complete_cover_patterns_sha256')!='0ada21e204825a2421c8fafef50395e829e27ebe4164fc34f4d5df3d80d1088b': shard_contract_failures.append('cover_hash')
+              selected.extend(manifest.get('selected_case_ids',[])); unsat.extend(manifest.get('unsat_case_ids',[])); sat.extend(manifest.get('sat_case_ids',[])); open_cases.extend(manifest.get('open_case_ids',[])); binding_failures.extend(manifest.get('binding_failure_case_ids',[]))
+          selected_unique=sorted(set(selected)); duplicate_selected=len(selected)!=len(selected_unique)
+          missing_case_ids=sorted(set(expected_open)-set(selected_unique)); unexpected_case_ids=sorted(set(selected_unique)-set(expected_open))
+          baseline_unsat=frontier['unsat_case_count']; total_accounted=baseline_unsat+len(set(unsat))+len(set(sat))+len(set(open_cases))+len(missing_case_ids)
+          cover_complete=(not missing_shards and not duplicate_selected and not missing_case_ids and not unexpected_case_ids and not binding_failures and not shard_contract_failures and tests_pass and selected_unique==expected_open)
+          if sat:
+              verdict='SAT_FOUND'
+          elif cover_complete and not open_cases and len(set(unsat))==15 and total_accounted==30:
+              verdict='TERMINAL_UNSAT_CANDIDATE'
+          else:
+              verdict='PARTIAL_OPEN'
+          merged={
+            'schema':'profile37-outside-degree-resume-merged-cover/v1',
+            'mode':'t4:7,8,8,8|8,8,8,8,9','inside':[7,8,8,8,8,8,8,8,9],
+            'request_id':request,'run_id':run,'run_attempt':attempt,
+            'frontier_git_blob':'d8407d78795835cbdfe80737cf7b646561af8b91',
+            'complete_cover_patterns_sha256':'0ada21e204825a2421c8fafef50395e829e27ebe4164fc34f4d5df3d80d1088b',
+            'baseline_explicit_unsat_cases':baseline_unsat,
+            'resumed_expected_cases':len(expected_open),
+            'resumed_selected_case_ids':selected_unique,
+            'resumed_unsat_case_ids':sorted(set(unsat)),
+            'resumed_sat_case_ids':sorted(set(sat)),
+            'resumed_open_case_ids':sorted(set(open_cases)),
+            'missing_case_ids':missing_case_ids,
+            'unexpected_case_ids':unexpected_case_ids,
+            'missing_shards':missing_shards,
+            'duplicate_selected_case':duplicate_selected,
+            'binding_failure_case_ids':sorted(set(binding_failures)),
+            'shard_contract_failures':shard_contract_failures,
+            'deterministic_tests_pass':tests_pass,
+            'total_cover_accounted':total_accounted,
+            'cover_complete':cover_complete,
+            'verdict':verdict,
+            'proof_status':'CANDIDATE_PENDING_INDEPENDENT_ADVERSARIAL_AUDIT',
+            'global_checkpoint_increment':0,
+            'shards':shard_records,
+          }
+          raw=(json.dumps(merged,indent=2,sort_keys=True)+'\n').encode()
+          receipt={'schema':'profile37-outside-degree-resume-merged-receipt/v1','request_id':request,'run_id':run,'run_attempt':attempt,'merged_sha256':hashlib.sha256(raw).hexdigest(),'verdict':verdict,'cover_complete':cover_complete,'bytes':len(raw)}
+          def put(path,data,message):
+              body=json.dumps({'message':message,'content':base64.b64encode(data).decode(),'branch':branch},separators=(',',':')).encode()
+              req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}',data=body,method='PUT',headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'merge-zal-resume'})
+              with urllib.request.urlopen(req,timeout=300) as r:r.read()
+          prefix=f'relay/results/{request}/{run}-{attempt}'
+          put(f'{prefix}/merged-cover.json',raw,'Store merged bounded ZAL cover')
+          put(f'{prefix}/merged-receipt.json',(json.dumps(receipt,indent=2,sort_keys=True)+'\n').encode(),'Store merged bounded ZAL receipt')
+          print(json.dumps(receipt,sort_keys=True))
+          PY
