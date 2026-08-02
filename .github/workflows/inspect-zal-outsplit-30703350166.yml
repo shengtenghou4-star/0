@@ -1,0 +1,139 @@
+name: Inspect ZAL outside split 30703350166
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/inspect-zal-outsplit-30703350166.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Recover and audit private archive
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, io, itertools, json, os, pathlib, tarfile, urllib.parse, urllib.request
+
+          token=os.environ['LAB_QUEUE_TOKEN']
+          repo='shengtenghou4-star/00'; branch='results'
+          request='7a8f0d51de9c4b72a630f184c2e5d9b7'; run='30703350166-1'
+          prefix=f'relay/results/{request}/{run}'
+
+          def fetch(path):
+              q=urllib.parse.urlencode({'ref':branch})
+              url=f'https://api.github.com/repos/{repo}/contents/{path}?{q}'
+              req=urllib.request.Request(url,headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'inspect-zal-outsplit'})
+              with urllib.request.urlopen(req,timeout=300) as r: env=json.load(r)
+              return base64.b64decode(env['content'])
+
+          receipt=json.loads(fetch(f'{prefix}/receipt.json'))
+          package=fetch(f'{prefix}/result.tar.gz')
+          package_sha=hashlib.sha256(package).hexdigest()
+          if package_sha!=receipt['result_sha256']:
+              raise SystemExit('package digest mismatch')
+
+          root=pathlib.Path('/tmp/unpack'); root.mkdir()
+          with tarfile.open(fileobj=io.BytesIO(package),mode='r:gz') as tf:
+              for m in tf.getmembers():
+                  p=pathlib.PurePosixPath(m.name)
+                  if p.is_absolute() or '..' in p.parts or m.issym() or m.islnk() or m.isdev():
+                      raise SystemExit('unsafe archive member')
+              tf.extractall(root,filter='data')
+
+          profile=[9]+[8]*13+[7]*2+[6]
+          inside=(7,8,8,8,8,8,8,8,9); t=4
+          outmin=8; outside_total=sum(profile)-sum(inside)
+          expected=[]
+          for second in itertools.combinations_with_replacement(range(outmin,13),8-t):
+              for neither in itertools.combinations_with_replacement(range(outmin,13),t-1):
+                  if sum(second)+sum(neither)==outside_total:
+                      expected.append((second,neither))
+          def cid(second,neither):
+              return 'b_'+'_'.join(map(str,second))+'__n_'+'_'.join(map(str,neither))
+          expected_map={cid(a,b):(list(a),list(b)) for a,b in expected}
+
+          reports=[]
+          for path in sorted((root/'split'/'cases').glob('*/report.json')):
+              raw=path.read_bytes(); row=json.loads(raw)
+              second=list(row.get('second_only',[])); neither=list(row.get('neither',[]))
+              expected_id=cid(tuple(second),tuple(neither)) if second and neither else None
+              reports.append({
+                  'directory':path.parent.name,
+                  'report_sha256':hashlib.sha256(raw).hexdigest(),
+                  'case_id':row.get('case_id'),
+                  'expected_case_id_from_payload':expected_id,
+                  'second_only':second,
+                  'neither':neither,
+                  'row_degrees':row.get('row_degrees'),
+                  'cnf_sha256':row.get('cnf_sha256'),
+                  'variables':row.get('variables'),
+                  'clauses':row.get('clauses'),
+                  'status':row.get('status'),
+                  'exit_code':row.get('exit_code'),
+                  'driver_exit_code':row.get('driver_exit_code'),
+              })
+
+          def duplicate_groups(field):
+              groups={}
+              for i,row in enumerate(reports):
+                  value=json.dumps(row.get(field),sort_keys=True,separators=(',',':'))
+                  groups.setdefault(value,[]).append(i)
+              return [ids for ids in groups.values() if len(ids)>1]
+
+          observed_ids=[row['directory'] for row in reports]
+          observed_patterns={(tuple(row['second_only']),tuple(row['neither'])) for row in reports}
+          manifest_path=root/'split'/'cover-manifest.json'
+          manifest=json.loads(manifest_path.read_text()) if manifest_path.exists() else None
+          test_path=root/'unit-tests.log'
+          test_bytes=test_path.read_bytes() if test_path.exists() else b''
+          batch_stdout=(root/'batch.stdout.txt').read_text(errors='replace') if (root/'batch.stdout.txt').exists() else ''
+          batch_stderr=(root/'batch.stderr.txt').read_text(errors='replace') if (root/'batch.stderr.txt').exists() else ''
+
+          audit={
+              'schema':'zal-outside-split-archive-inspection/v2',
+              'request_id':request,'run_attempt':run,
+              'package_sha256':package_sha,'package_bytes':len(package),
+              'receipt':receipt,
+              'expected_pattern_count':len(expected),
+              'expected_patterns_sha256':hashlib.sha256(json.dumps(expected,separators=(',',':')).encode()).hexdigest(),
+              'report_count':len(reports),
+              'unique_directory_count':len(set(observed_ids)),
+              'unique_payload_pattern_count':len(observed_patterns),
+              'missing_expected_case_ids':sorted(set(expected_map)-set(observed_ids)),
+              'unexpected_case_directories':sorted(set(observed_ids)-set(expected_map)),
+              'directory_payload_binding_failures':[row['directory'] for row in reports if row['directory']!=row['expected_case_id_from_payload']],
+              'manifest_case_id_binding_failures':[row['directory'] for row in reports if row['case_id']!=row['expected_case_id_from_payload']],
+              'duplicate_report_sha_groups':duplicate_groups('report_sha256'),
+              'duplicate_cnf_sha_groups':duplicate_groups('cnf_sha256'),
+              'duplicate_row_degree_groups':duplicate_groups('row_degrees'),
+              'status_counts':{s:sum(row['status']==s for row in reports) for s in sorted({row['status'] for row in reports})},
+              'unit_test_log_exists':test_path.exists(),
+              'unit_test_log_bytes':len(test_bytes),
+              'unit_test_log_sha256':hashlib.sha256(test_bytes).hexdigest(),
+              'unit_test_log_preview':test_bytes.decode(errors='replace')[:2000],
+              'batch_stdout':batch_stdout[:2000],
+              'batch_stderr':batch_stderr[:2000],
+              'cover_manifest':manifest,
+              'reports':reports,
+          }
+
+          out=(json.dumps(audit,indent=2,sort_keys=True)+'\n').encode()
+          path=f'relay/focused-inspections/{request}/{run}/inspection-r2.json'
+          url=f'https://api.github.com/repos/{repo}/contents/{path}'
+          body=json.dumps({'message':'Store ZAL outside split inspection r2','content':base64.b64encode(out).decode(),'branch':branch},separators=(',',':')).encode()
+          req=urllib.request.Request(url,data=body,method='PUT',headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'inspect-zal-outsplit'})
+          with urllib.request.urlopen(req,timeout=300) as r: r.read()
+          print(json.dumps({k:audit[k] for k in ('report_count','unique_directory_count','unique_payload_pattern_count','unit_test_log_bytes','status_counts')},sort_keys=True))
+          PY
