@@ -1,0 +1,35 @@
+name: Status inspect ZAL outside split
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/status-inspect-zal-outsplit.yml'
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  status:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Store target workflow status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, urllib.request
+          req=urllib.request.Request('https://api.github.com/repos/shengtenghou4-star/0/actions/workflows/inspect-zal-outsplit-30703350166.yml/runs?per_page=5',headers={'Authorization':f"Bearer {os.environ['GH_TOKEN']}",'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'status-inspect-zal'})
+          with urllib.request.urlopen(req,timeout=120) as r: data=json.load(r)
+          out={'schema':1,'workflow':'inspect-zal-outsplit-30703350166.yml','runs':[{k:x.get(k) for k in ('id','status','conclusion','run_number','head_sha','created_at','updated_at','html_url')} for x in data.get('workflow_runs',[])]}
+          open('status-inspect-zal-outsplit.json','w').write(json.dumps(out,indent=2,sort_keys=True)+'\n')
+          PY
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add status-inspect-zal-outsplit.json
+          git commit -m 'Update ZAL outside split inspection status' || exit 0
+          git push
