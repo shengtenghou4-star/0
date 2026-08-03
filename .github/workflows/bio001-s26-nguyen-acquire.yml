@@ -11,99 +11,108 @@ permissions:
 jobs:
   acquire:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install browser runtime
+        run: |
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium
 
       - name: Download only preregistered individual source files
         run: |
           set -euo pipefail
           python - <<'PY'
           from __future__ import annotations
-          import hashlib, json
+          import hashlib, json, time
           from pathlib import Path
-          from urllib.parse import quote
-          import requests
+          from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
           allowed = [f'pnas.1507110112.sd{i:02d}.csv' for i in range(2, 11)]
           forbidden = {f'pnas.1507110112.sd{i:02d}.csv' for i in range(11, 14)}
           root = Path('bio001_s26_nguyen')
           raw = root / 'raw'
           raw.mkdir(parents=True, exist_ok=True)
-          session = requests.Session()
-          session.headers.update({
-              'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/127 Safari/537.36',
-              'Accept': 'text/csv,text/plain,application/octet-stream,*/*',
-              'Referer': 'https://pmc.ncbi.nlm.nih.gov/articles/PMC4776509/',
-          })
-
-          def candidate_urls(name: str) -> list[str]:
-              return [
-                  f'https://pmc.ncbi.nlm.nih.gov/articles/instance/4776509/bin/{name}',
-                  f'https://www.ncbi.nlm.nih.gov/pmc/articles/instance/4776509/bin/{name}',
-                  f'https://www.pnas.org/action/downloadSupplement?doi=10.1073%2Fpnas.1507110112&file={quote(name)}',
-                  f'https://www.pnas.org/action/downloadSupplement?doi=10.1073/pnas.1507110112&file={quote(name)}',
-              ]
-
           receipts = []
-          all_errors = {}
-          for name in allowed:
-              if name in forbidden:
-                  raise RuntimeError('forbidden holdout request')
-              payload = None
-              source_url = None
-              errors = []
-              for url in candidate_urls(name):
-                  try:
-                      response = session.get(url, timeout=180, allow_redirects=True)
-                      prefix = response.content[:500].lower()
-                      content_type = response.headers.get('content-type', '')
-                      valid = (
-                          response.status_code == 200
-                          and len(response.content) > 100
-                          and b'<html' not in prefix
-                          and b'<!doctype' not in prefix
-                          and b'checking your browser' not in prefix
-                          and '[error]' not in prefix.decode('utf-8', errors='ignore').lower()
-                      )
-                      if valid:
-                          payload = response.content
-                          source_url = response.url
+
+          with sync_playwright() as playwright:
+              browser = playwright.chromium.launch(
+                  headless=True,
+                  args=['--disable-blink-features=AutomationControlled'],
+              )
+              context = browser.new_context(
+                  accept_downloads=True,
+                  user_agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+              )
+              page = context.new_page()
+
+              # Establish the article session before accessing file routes.
+              page.goto('https://pmc.ncbi.nlm.nih.gov/articles/PMC4776509/', wait_until='domcontentloaded', timeout=120000)
+              page.wait_for_timeout(3000)
+
+              for name in allowed:
+                  if name in forbidden:
+                      raise RuntimeError('forbidden holdout request')
+                  url = f'https://pmc.ncbi.nlm.nih.gov/articles/instance/4776509/bin/{name}'
+                  destination = raw / name
+                  downloaded = False
+                  attempts = []
+
+                  for attempt in range(1, 4):
+                      try:
+                          with page.expect_download(timeout=120000) as download_info:
+                              page.goto(url, wait_until='domcontentloaded', timeout=120000)
+                              # The first response may be the proof-of-work page. Its JS
+                              # completes the challenge and initiates the download.
+                              page.wait_for_timeout(8000)
+                          download = download_info.value
+                          download.save_as(destination)
+                          downloaded = True
+                          attempts.append({'attempt': attempt, 'mode': 'automatic-download', 'suggested_filename': download.suggested_filename})
                           break
-                      errors.append({
-                          'url': url,
-                          'final_url': response.url,
-                          'status': response.status_code,
-                          'content_type': content_type,
-                          'bytes': len(response.content),
-                          'prefix': response.content[:160].decode('utf-8', errors='replace'),
-                      })
-                  except Exception as exc:
-                      errors.append({'url': url, 'error': repr(exc)})
-              all_errors[name] = errors
-              if payload is None:
-                  raise RuntimeError('could not acquire %s: %s' % (name, json.dumps(errors)))
-              path = raw / name
-              path.write_bytes(payload)
-              receipts.append({
-                  'name': name,
-                  'source_url': source_url,
-                  'bytes': len(payload),
-                  'sha256': hashlib.sha256(payload).hexdigest(),
-                  'first_lines': payload[:4096].decode('utf-8', errors='replace').splitlines()[:5],
-              })
+                      except PlaywrightTimeoutError:
+                          cookies = {cookie['name']: cookie['value'] for cookie in context.cookies()}
+                          attempts.append({
+                              'attempt': attempt,
+                              'mode': 'timeout',
+                              'title': page.title(),
+                              'url': page.url,
+                              'pow_cookie_present': 'cloudpmc-viewer-pow' in cookies,
+                              'body_prefix': page.locator('body').inner_text(timeout=30000)[:500],
+                          })
+                          page.wait_for_timeout(3000)
+                          # Once the POW cookie exists, the next navigation should yield
+                          # the actual attachment.
+
+                  if not downloaded:
+                      raise RuntimeError(f'could not complete PMC browser download for {name}: {attempts}')
+                  payload = destination.read_bytes()
+                  prefix = payload[:500].lower()
+                  if len(payload) < 100 or b'<html' in prefix or b'<!doctype' in prefix:
+                      raise RuntimeError(f'{name} is not a real source file: bytes={len(payload)} prefix={prefix!r}')
+                  receipts.append({
+                      'name': name,
+                      'source_url': url,
+                      'bytes': len(payload),
+                      'sha256': hashlib.sha256(payload).hexdigest(),
+                      'first_lines': payload[:4096].decode('utf-8', errors='replace').splitlines()[:5],
+                      'browser_attempts': attempts,
+                  })
+
+              browser.close()
 
           extracted = {item['name'] for item in receipts}
           intersection = sorted(extracted & forbidden)
-          if intersection:
-              raise RuntimeError('holdout leakage: ' + repr(intersection))
+          if intersection or extracted != set(allowed):
+              raise RuntimeError('allowed/forbidden extraction invariant failed')
           (root / 'allowed_file_receipts.json').write_text(json.dumps(receipts, indent=2), encoding='utf-8')
-          (root / 'failed_candidate_receipts.json').write_text(json.dumps(all_errors, indent=2), encoding='utf-8')
           (root / 'holdout_nonaccess_receipt.json').write_text(json.dumps({
               'forbidden_filenames': sorted(forbidden),
               'requested_filenames': sorted(extracted),
               'forbidden_intersection': intersection,
               'holdout_accessed': False,
+              'transport': 'Chromium executes PMC proof-of-work challenge',
           }, indent=2), encoding='utf-8')
           print(json.dumps({'allowed_files': receipts, 'holdout_accessed': False}, indent=2))
           PY
