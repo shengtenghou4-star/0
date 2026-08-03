@@ -1,0 +1,1 @@
+Use acquire_direct.py. Split, filenames and holdout prohibition are unchanged. Only sd02-sd10 may be requested before model freeze.
