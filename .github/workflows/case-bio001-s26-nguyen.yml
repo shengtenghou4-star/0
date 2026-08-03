@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install --upgrade requests
-      - run: python cases/bio001-s26-nguyen/acquire_pow.py
+      - run: python cases/bio001-s26-nguyen/probe_replay.py
       - if: always()
         uses: actions/upload-artifact@v4
         with:
