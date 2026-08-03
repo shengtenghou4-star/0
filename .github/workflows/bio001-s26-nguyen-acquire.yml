@@ -15,85 +15,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install remote ZIP reader
-        run: python -m pip install requests remotezip
-
-      - name: Read only preregistered train and development entries
+      - name: Probe allowed supplementary item 7 only
         run: |
           set -euo pipefail
+          mkdir -p bio001_s26_nguyen/probe
           python - <<'PY'
           from __future__ import annotations
           import hashlib, json
           from pathlib import Path
           import requests
-          from remotezip import RemoteZip
 
-          zip_url = 'https://www.ebi.ac.uk/europepmc/webservices/rest/PMC4776509/supplementaryFiles'
-          allowed = {f'pnas.1507110112.sd{i:02d}.csv' for i in range(2, 11)}
-          forbidden = {f'pnas.1507110112.sd{i:02d}.csv' for i in range(11, 14)}
-          out = Path('bio001_s26_nguyen')
-          raw = out / 'raw'
-          raw.mkdir(parents=True, exist_ok=True)
-
-          probe = requests.get(zip_url, headers={'Range': 'bytes=-65536', 'User-Agent': 'BIO-001-S26/1.0'}, timeout=90, allow_redirects=True)
-          lower_headers = {key.lower(): value for key, value in probe.headers.items()}
-          if probe.status_code != 206 or 'content-range' not in lower_headers:
-              raise RuntimeError(f'official ZIP endpoint does not provide enforceable byte ranges: status={probe.status_code}, headers={dict(probe.headers)}')
-
-          with RemoteZip(zip_url, headers={'User-Agent': 'BIO-001-S26/1.0'}, support_suffix_range=True) as archive:
-              infos = archive.infolist()
-              inventory = [{
-                  'path': info.filename,
-                  'compressed_bytes': info.compress_size,
-                  'uncompressed_bytes': info.file_size,
-                  'crc32': f'{info.CRC:08x}',
-              } for info in infos]
-              (out / 'remote_zip_inventory.json').write_text(json.dumps(inventory, indent=2), encoding='utf-8')
-              by_basename = {}
-              for info in infos:
-                  by_basename.setdefault(Path(info.filename).name, []).append(info.filename)
-              missing = sorted(name for name in allowed if len(by_basename.get(name, [])) != 1)
-              if missing:
-                  raise RuntimeError('missing or ambiguous allowed entries: ' + repr(missing))
-              receipts = []
-              for name in sorted(allowed):
-                  member = by_basename[name][0]
-                  payload = archive.read(member)
-                  path = raw / name
-                  path.write_bytes(payload)
-                  receipts.append({
-                      'name': name,
-                      'zip_member': member,
-                      'bytes': len(payload),
-                      'sha256': hashlib.sha256(payload).hexdigest(),
-                      'first_lines': path.read_text(encoding='utf-8', errors='replace').splitlines()[:5],
-                  })
-
-          requested = {record['name'] for record in receipts}
-          intersection = sorted(requested & forbidden)
-          if intersection:
-              raise RuntimeError('holdout leakage: ' + repr(intersection))
-          (out / 'acquisition_receipt.json').write_text(json.dumps(receipts, indent=2), encoding='utf-8')
-          (out / 'holdout_nonaccess_receipt.json').write_text(json.dumps({
-              'official_archive_url': zip_url,
-              'transport': 'HTTP range requests only',
-              'forbidden_names': sorted(forbidden),
-              'read_names': sorted(requested),
-              'intersection': intersection,
-              'full_archive_downloaded': False,
-          }, indent=2), encoding='utf-8')
+          url = 'https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/supplmat.cgi/bioc_json/26712014/7'
+          response = requests.get(url, timeout=120, allow_redirects=True, headers={'User-Agent': 'BIO-001-S26/1.0'})
+          out = Path('bio001_s26_nguyen/probe')
+          body = out / 'item7.response'
+          body.write_bytes(response.content)
+          receipt = {
+              'requested_index': 7,
+              'expected_name_from_article_order': 'pnas.1507110112.sd02.csv',
+              'url': url,
+              'final_url': response.url,
+              'status': response.status_code,
+              'headers': dict(response.headers),
+              'bytes': len(response.content),
+              'sha256': hashlib.sha256(response.content).hexdigest(),
+              'first_1000_text': response.content[:1000].decode('utf-8', errors='replace'),
+          }
+          (out / 'item7.receipt.json').write_text(json.dumps(receipt, indent=2), encoding='utf-8')
+          print(json.dumps(receipt, indent=2))
+          if response.status_code != 200 or len(response.content) < 100:
+              raise RuntimeError('single supplementary item probe failed')
           PY
-
-      - name: Package acquired source bytes
-        run: |
-          tar -czf bio001-s26-nguyen-train-dev.tar.gz bio001_s26_nguyen
-          sha256sum bio001-s26-nguyen-train-dev.tar.gz > bio001-s26-nguyen-train-dev.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: bio001-s26-nguyen-train-dev
-          path: |
-            bio001-s26-nguyen-train-dev.tar.gz
-            bio001-s26-nguyen-train-dev.sha256
+          name: bio001-s26-nguyen-item7-probe
+          path: bio001_s26_nguyen/probe
           retention-days: 30
           if-no-files-found: error
