@@ -1,0 +1,4 @@
+BIO-001 S26 animal-level model training.
+Preregistration: 2200444ea0e43069597da277ed7a6378b7bdea67.
+Feature amendment: 596318171b14b3998b8fceb46384399e799952c4.
+Train recordings: six; development recordings: two; holdout recordings remain unextracted.
