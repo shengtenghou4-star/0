@@ -1,0 +1,138 @@
+name: case-51d10de51e0f4a7ca9f6d583f9f6f251
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/case_51d10de51e0f4a7ca9f6d583f9f6f251.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixed-case:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Download and verify six official LMSD FRF matrices
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p case_output/data
+          python - <<'PY'
+          from __future__ import annotations
+          import hashlib
+          import json
+          import pathlib
+          import time
+          import urllib.parse
+          import urllib.request
+
+          case_id = '51d10de51e0f4a7ca9f6d583f9f6f251'
+          files = [
+              ('1 mass.npz', '6331889fe7c82f0210e4ed0116db2ee4', 164323),
+              ('3 masses.npz', 'c5ad84b6266dd56c5b20664c7f5b29f2', 164322),
+              ('4 masses.npz', '39d6c3daca4b6dbd39ab90e248157034', 164344),
+              ('5 masses.npz', '236e8205e6d2246f8183acfe8d8fe131', 164319),
+              ('6 masses.npz', '9a512f9cdd0764fde58fa1a69b5dd837', 164332),
+              ('1 elongated mass.npz', '692cdecfdfa99a5d9bacf372f3124391', 164321),
+          ]
+          route_templates = [
+              'https://zenodo.org/api/records/11033677/files/{name}/content',
+              'https://zenodo.org/api/records/10899417/files/{name}/content',
+              'https://rdr.kuleuven.be/api/access/datafile/{fid}',
+          ]
+          root = pathlib.Path('case_output')
+          data_dir = root / 'data'
+
+          def digest(path: pathlib.Path, algorithm: str) -> str:
+              h = hashlib.new(algorithm)
+              with path.open('rb') as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          receipt = {
+              'schema': 'reference-matrix-lmsd-public-acquisition-v1',
+              'case': case_id,
+              'dataset_doi': '10.48804/GDE9TW',
+              'scope': 'six unmodified public LMSD NPZ files plus cryptographic receipt only; no private analysis code or manuscript content',
+              'files': [],
+          }
+
+          for filename, expected_md5, file_id in files:
+              destination = data_dir / filename
+              attempts = []
+              passed = False
+              for template in route_templates:
+                  route = template.format(name=urllib.parse.quote(filename), fid=file_id)
+                  for attempt in range(1, 4):
+                      partial = destination.with_suffix(destination.suffix + '.part')
+                      partial.unlink(missing_ok=True)
+                      try:
+                          request = urllib.request.Request(
+                              route,
+                              headers={
+                                  'User-Agent': 'reference-matrix/1.0',
+                                  'Accept': 'application/octet-stream',
+                              },
+                          )
+                          with urllib.request.urlopen(request, timeout=240) as response, partial.open('wb') as output:
+                              while True:
+                                  chunk = response.read(1024 * 1024)
+                                  if not chunk:
+                                      break
+                                  output.write(chunk)
+                          actual_md5 = digest(partial, 'md5')
+                          if actual_md5 != expected_md5:
+                              raise RuntimeError(f'MD5 mismatch {actual_md5}')
+                          partial.replace(destination)
+                          receipt['files'].append({
+                              'filename': filename,
+                              'expected_md5': expected_md5,
+                              'actual_md5': actual_md5,
+                              'sha256': digest(destination, 'sha256'),
+                              'bytes': destination.stat().st_size,
+                              'route': route,
+                              'attempts_before_success': attempts,
+                              'verified': True,
+                          })
+                          passed = True
+                          break
+                      except Exception as exc:
+                          partial.unlink(missing_ok=True)
+                          attempts.append({'route': route, 'attempt': attempt, 'error': repr(exc)})
+                          time.sleep(min(2 ** (attempt - 1), 4))
+                  if passed:
+                      break
+              if not passed:
+                  receipt['files'].append({
+                      'filename': filename,
+                      'expected_md5': expected_md5,
+                      'verified': False,
+                      'attempts': attempts,
+                  })
+                  (root / 'ACQUISITION_RECEIPT.json').write_text(
+                      json.dumps(receipt, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+                  )
+                  raise SystemExit(f'Unable to acquire verified file: {filename}')
+
+          receipt['all_verified'] = len(receipt['files']) == 6 and all(row['verified'] for row in receipt['files'])
+          receipt['total_bytes'] = sum(row['bytes'] for row in receipt['files'])
+          (root / 'ACQUISITION_RECEIPT.json').write_text(
+              json.dumps(receipt, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+          )
+          print(json.dumps(receipt, indent=2, sort_keys=True))
+          if not receipt['all_verified']:
+              raise SystemExit('Acquisition receipt did not close')
+          PY
+
+      - name: Upload public LMSD source artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: case-51d10de51e0f4a7ca9f6d583f9f6f251
+          path: case_output/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
