@@ -15,7 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download only preregistered train and development files
+      - name: Install remote ZIP reader
+        run: python -m pip install requests remotezip
+
+      - name: Read only preregistered train and development entries
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -23,62 +26,61 @@ jobs:
           import hashlib, json
           from pathlib import Path
           import requests
+          from remotezip import RemoteZip
 
-          names = [f'pnas.1507110112.sd{i:02d}.csv' for i in range(2, 11)]
+          zip_url = 'https://www.ebi.ac.uk/europepmc/webservices/rest/PMC4776509/supplementaryFiles'
+          allowed = {f'pnas.1507110112.sd{i:02d}.csv' for i in range(2, 11)}
           forbidden = {f'pnas.1507110112.sd{i:02d}.csv' for i in range(11, 14)}
           out = Path('bio001_s26_nguyen')
           raw = out / 'raw'
           raw.mkdir(parents=True, exist_ok=True)
-          session = requests.Session()
-          session.headers.update({'User-Agent': 'BIO-001-S26-Nguyen-acquisition/1.0'})
 
-          def candidates(name: str):
-              return [
-                  f'https://pmc.ncbi.nlm.nih.gov/articles/PMC4776509/bin/{name}',
-                  f'https://www.pnas.org/doi/suppl/10.1073/pnas.1507110112/suppl_file/{name}',
-                  f'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4776509/bin/{name}',
-              ]
+          probe = requests.get(zip_url, headers={'Range': 'bytes=-65536', 'User-Agent': 'BIO-001-S26/1.0'}, timeout=90, allow_redirects=True)
+          lower_headers = {key.lower(): value for key, value in probe.headers.items()}
+          if probe.status_code != 206 or 'content-range' not in lower_headers:
+              raise RuntimeError(f'official ZIP endpoint does not provide enforceable byte ranges: status={probe.status_code}, headers={dict(probe.headers)}')
 
-          receipts = []
-          for name in names:
-              if name in forbidden:
-                  raise RuntimeError('forbidden holdout request')
-              errors = []
-              payload = None
-              source = None
-              for url in candidates(name):
-                  try:
-                      response = session.get(url, timeout=90, allow_redirects=True)
-                      if response.status_code == 200 and len(response.content) > 100:
-                          prefix = response.content[:200].lower()
-                          if b'<html' not in prefix and b'<!doctype' not in prefix:
-                              payload = response.content
-                              source = response.url
-                              break
-                      errors.append({'url': url, 'status': response.status_code, 'bytes': len(response.content)})
-                  except Exception as exc:
-                      errors.append({'url': url, 'error': repr(exc)})
-              if payload is None:
-                  raise RuntimeError(f'could not acquire {name}: {errors}')
-              path = raw / name
-              path.write_bytes(payload)
-              first_lines = path.read_text(encoding='utf-8', errors='replace').splitlines()[:5]
-              receipts.append({
-                  'name': name,
-                  'source_url': source,
-                  'bytes': len(payload),
-                  'sha256': hashlib.sha256(payload).hexdigest(),
-                  'first_lines': first_lines,
-              })
+          with RemoteZip(zip_url, headers={'User-Agent': 'BIO-001-S26/1.0'}, support_suffix_range=True) as archive:
+              infos = archive.infolist()
+              inventory = [{
+                  'path': info.filename,
+                  'compressed_bytes': info.compress_size,
+                  'uncompressed_bytes': info.file_size,
+                  'crc32': f'{info.CRC:08x}',
+              } for info in infos]
+              (out / 'remote_zip_inventory.json').write_text(json.dumps(inventory, indent=2), encoding='utf-8')
+              by_basename = {}
+              for info in infos:
+                  by_basename.setdefault(Path(info.filename).name, []).append(info.filename)
+              missing = sorted(name for name in allowed if len(by_basename.get(name, [])) != 1)
+              if missing:
+                  raise RuntimeError('missing or ambiguous allowed entries: ' + repr(missing))
+              receipts = []
+              for name in sorted(allowed):
+                  member = by_basename[name][0]
+                  payload = archive.read(member)
+                  path = raw / name
+                  path.write_bytes(payload)
+                  receipts.append({
+                      'name': name,
+                      'zip_member': member,
+                      'bytes': len(payload),
+                      'sha256': hashlib.sha256(payload).hexdigest(),
+                      'first_lines': path.read_text(encoding='utf-8', errors='replace').splitlines()[:5],
+                  })
 
-          (out / 'acquisition_receipt.json').write_text(json.dumps(receipts, indent=2), encoding='utf-8')
           requested = {record['name'] for record in receipts}
-          if requested & forbidden:
-              raise RuntimeError('holdout leakage')
+          intersection = sorted(requested & forbidden)
+          if intersection:
+              raise RuntimeError('holdout leakage: ' + repr(intersection))
+          (out / 'acquisition_receipt.json').write_text(json.dumps(receipts, indent=2), encoding='utf-8')
           (out / 'holdout_nonaccess_receipt.json').write_text(json.dumps({
+              'official_archive_url': zip_url,
+              'transport': 'HTTP range requests only',
               'forbidden_names': sorted(forbidden),
-              'requested_names': sorted(requested),
-              'intersection': sorted(requested & forbidden),
+              'read_names': sorted(requested),
+              'intersection': intersection,
+              'full_archive_downloaded': False,
           }, indent=2), encoding='utf-8')
           PY
 
