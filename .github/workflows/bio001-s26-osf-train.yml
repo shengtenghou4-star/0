@@ -1,0 +1,44 @@
+name: BIO001 S26 OSF model training
+
+on:
+  pull_request:
+    paths:
+      - 'cases/bio001-s26-osf-train/**'
+
+permissions:
+  contents: read
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install scientific Python
+        run: python -m pip install requests numpy scipy
+
+      - name: Acquire frozen train-dev recordings
+        run: python tools/bio001_s26/acquire_hallinen.py --output-root s26_train --mode train-dev
+
+      - name: Train and freeze behavior-only and neural-behavior models
+        run: |
+          python tools/bio001_s26/train_hallinen.py \
+            --extracted-root s26_train/extracted \
+            --split-receipt s26_train/results/split_receipt.json \
+            --archive-receipts s26_train/results/archive_receipts.json \
+            --output-dir s26_train/model
+
+      - name: Package compact model result
+        run: |
+          cp s26_train/results/archive_receipts.json s26_train/model/
+          cp s26_train/results/split_receipt.json s26_train/model/
+          cp s26_train/results/custody_receipt.json s26_train/model/
+          sha256sum s26_train/model/* > s26_train/model/MANIFEST.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s26-hallinen-frozen-model
+          path: s26_train/model
+          retention-days: 30
+          if-no-files-found: error
