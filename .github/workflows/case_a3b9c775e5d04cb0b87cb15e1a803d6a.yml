@@ -1,0 +1,124 @@
+name: case-a3b9c775e5d04cb0b87cb15e1a803d6a
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/case_a3b9c775e5d04cb0b87cb15e1a803d6a.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixed-case:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Download hash-frozen baseline and extract compact axis evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p case_output
+          python -m pip install --disable-pip-version-check --quiet numpy==2.2.6
+          python - <<'PY'
+          from __future__ import annotations
+          import hashlib
+          import json
+          import pathlib
+          import urllib.parse
+          import urllib.request
+          import numpy as np
+
+          case_id = 'a3b9c775e5d04cb0b87cb15e1a803d6a'
+          expected_name = 'baseline.npz'
+          expected_md5 = '7b3a5b89768831fcf80942d75de84ccd'
+          root = pathlib.Path('case_output')
+          baseline = root / expected_name
+          metadata_url = 'https://rdr.kuleuven.be/api/datasets/:persistentId/?' + urllib.parse.urlencode(
+              {'persistentId': 'doi:10.48804/GDE9TW'}
+          )
+          headers = {'User-Agent': 'reference-matrix/1.0', 'Accept': 'application/json'}
+          with urllib.request.urlopen(urllib.request.Request(metadata_url, headers=headers), timeout=180) as response:
+              metadata = json.load(response)
+          files = metadata['data']['latestVersion']['files']
+          matches = [row for row in files if row.get('label') == expected_name]
+          if len(matches) != 1:
+              raise SystemExit(f'Expected one {expected_name}, found {len(matches)}')
+          data_file = matches[0]['dataFile']
+          file_id = int(data_file['id'])
+          metadata_checksum = data_file.get('checksum', {})
+          if metadata_checksum.get('type') != 'MD5' or metadata_checksum.get('value', '').lower() != expected_md5:
+              raise SystemExit(f'Official metadata checksum mismatch: {metadata_checksum}')
+          content_url = f'https://rdr.kuleuven.be/api/access/datafile/{file_id}'
+          request = urllib.request.Request(content_url, headers={'User-Agent': 'reference-matrix/1.0'})
+          md5 = hashlib.md5(usedforsecurity=False)
+          sha256 = hashlib.sha256()
+          size = 0
+          with urllib.request.urlopen(request, timeout=300) as response, baseline.open('wb') as output:
+              while True:
+                  chunk = response.read(1024 * 1024)
+                  if not chunk:
+                      break
+                  output.write(chunk)
+                  md5.update(chunk)
+                  sha256.update(chunk)
+                  size += len(chunk)
+          if md5.hexdigest() != expected_md5:
+              raise SystemExit(f'Baseline MD5 mismatch: {md5.hexdigest()}')
+
+          with np.load(baseline, allow_pickle=False) as archive:
+              required = {'frequency', 'probing_nodes', 'node_position', 'frf'}
+              if not required.issubset(archive.files):
+                  raise SystemExit(f'Missing baseline keys: {required - set(archive.files)}')
+              frequency = np.asarray(archive['frequency'], dtype=np.float64).reshape(-1)
+              probing_nodes = np.asarray(archive['probing_nodes']).reshape(-1)
+              node_position = np.asarray(archive['node_position'], dtype=np.float64)
+              frf_shape = list(np.asarray(archive['frf']).shape)
+          if frequency.shape != (8192,) or frf_shape != [7, 144, 8192]:
+              raise SystemExit(f'Unexpected shapes frequency={frequency.shape} frf={frf_shape}')
+          if probing_nodes.shape != (7,) or node_position.shape != (144, 2):
+              raise SystemExit(f'Unexpected geometry shapes nodes={probing_nodes.shape} positions={node_position.shape}')
+          if not np.all(np.diff(frequency) > 0):
+              raise SystemExit('Frequency vector is not strictly increasing')
+
+          compact = root / 'LMSD_AXIS_EVIDENCE.npz'
+          np.savez_compressed(
+              compact,
+              frequency=frequency,
+              probing_nodes=probing_nodes,
+              node_position=node_position,
+          )
+          receipt = {
+              'schema': 'reference-matrix-lmsd-axis-evidence-v1',
+              'case': case_id,
+              'dataset_doi': '10.48804/GDE9TW',
+              'baseline_file_id': file_id,
+              'baseline_bytes': size,
+              'baseline_md5': md5.hexdigest(),
+              'baseline_sha256': sha256.hexdigest(),
+              'baseline_frf_shape': frf_shape,
+              'frequency_bins': int(frequency.size),
+              'frequency_first_hz': float(frequency[0]),
+              'frequency_last_hz': float(frequency[-1]),
+              'frequency_min_step_hz': float(np.diff(frequency).min()),
+              'frequency_max_step_hz': float(np.diff(frequency).max()),
+              'frequency_uniform': bool(np.allclose(np.diff(frequency), np.diff(frequency)[0], rtol=0, atol=1e-12)),
+              'probing_nodes_zero_based': probing_nodes.astype(int).tolist(),
+              'node_position_shape': list(node_position.shape),
+              'compact_sha256': hashlib.sha256(compact.read_bytes()).hexdigest(),
+              'scope': 'compact public axis and colocated-port evidence only; baseline FRF bytes deleted before artifact upload',
+              'verified': True,
+          }
+          (root / 'AXIS_RECEIPT.json').write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          baseline.unlink()
+          print(json.dumps(receipt, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload compact LMSD axis evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: case-a3b9c775e5d04cb0b87cb15e1a803d6a
+          path: case_output/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
