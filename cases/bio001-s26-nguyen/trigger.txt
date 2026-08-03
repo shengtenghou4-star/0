@@ -2,4 +2,5 @@ BIO-001 S26 Nguyen training/development source acquisition.
 Allowed source files: sd02-sd10 only.
 Forbidden before model freeze: sd11-sd13.
 Preregistration commit: a4d1e103606eb26344455f49db8c0324d95549ae.
-Attempt 3 transport: BioC single-item endpoint, item 7 only.
+Custody amendment commit: cecce29544d1242b709114afe5002580ee4b6b76.
+Attempt 4 transport: monolithic official archive inside ephemeral CI; upload only allowed entries.
