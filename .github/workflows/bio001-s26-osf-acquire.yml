@@ -83,16 +83,18 @@ jobs:
           archive_receipts = []
           for record in sorted(targets, key=lambda item: item['name']):
               destination = raw / record['name']
+              digest = hashlib.sha256()
               with session.get(record['download'], stream=True, timeout=300) as response:
                   response.raise_for_status()
                   with destination.open('wb') as handle:
                       for chunk in response.iter_content(1024 * 1024):
                           if chunk:
                               handle.write(chunk)
+                              digest.update(chunk)
               archive_receipts.append({
                   'name': destination.name,
                   'bytes': destination.stat().st_size,
-                  'sha256': hashlib.sha256(destination.read_bytes()).hexdigest(),
+                  'sha256': digest.hexdigest(),
                   'osf_file_id': record['id'],
               })
           (results / 'archive_receipts.json').write_text(json.dumps(archive_receipts, indent=2), encoding='utf-8')
@@ -110,24 +112,13 @@ jobs:
                   if len(lists) != 1:
                       raise RuntimeError(f'{condition}: expected one datasets list, got {len(lists)}')
                   lines = tar.extractfile(lists[0]).read().decode('utf-8').splitlines()
-                  identifiers = sorted({
-                      line.split('#', 1)[0].strip().split()[0]
-                      for line in lines
-                      if line.split('#', 1)[0].strip()
-                  })
+                  identifiers = sorted({line.split('#', 1)[0].strip().split()[0] for line in lines if line.split('#', 1)[0].strip()})
                   alias_map = {chr(65 + index): identifier for index, identifier in enumerate(identifiers)}
                   required = sum(frozen_aliases[condition].values(), [])
                   if any(alias not in alias_map for alias in required):
                       raise RuntimeError(f'{condition}: insufficient recordings: {identifiers}')
-                  split = {
-                      part: [alias_map[alias] for alias in letters]
-                      for part, letters in frozen_aliases[condition].items()
-                  }
-                  split_receipt[condition] = {
-                      'identifiers_lexicographic': identifiers,
-                      'alias_map': alias_map,
-                      'split': split,
-                  }
+                  split = {part: [alias_map[alias] for alias in letters] for part, letters in frozen_aliases[condition].items()}
+                  split_receipt[condition] = {'identifiers_lexicographic': identifiers, 'alias_map': alias_map, 'split': split}
                   allowed_ids = set(split['train'] + split['dev'])
                   for member in members:
                       if member.isfile() and (member == lists[0] or any(identifier in member.name for identifier in allowed_ids)):
@@ -139,40 +130,30 @@ jobs:
           leaked = [identifier for identifier in forbidden if any(identifier in path for path in extracted_paths)]
           if leaked:
               raise RuntimeError('holdout extraction leak: ' + repr(leaked))
-          (results / 'holdout_nonaccess_receipt.json').write_text(json.dumps({
-              'holdout_identifiers': forbidden,
-              'leaked_identifiers': leaked,
-              'holdout_extracted': False,
-          }, indent=2), encoding='utf-8')
+          (results / 'holdout_nonaccess_receipt.json').write_text(json.dumps({'holdout_identifiers': forbidden, 'leaked_identifiers': leaked, 'holdout_extracted': False}, indent=2), encoding='utf-8')
 
           import scipy.io
           schemas = []
           for path in sorted(extracted.rglob('heatDataMS.mat')):
               try:
                   data = scipy.io.loadmat(path)
-                  fields = {key: list(value.shape) for key, value in data.items() if not key.startswith('__')}
+                  fields = {key: {'shape': list(value.shape), 'dtype': str(value.dtype)} for key, value in data.items() if not key.startswith('__')}
                   fmt = 'mat-v5'
               except NotImplementedError:
                   import h5py
                   with h5py.File(path, 'r') as handle:
-                      fields = {key: list(handle[key].shape) for key in handle.keys()}
+                      fields = {key: {'shape': list(handle[key].shape), 'dtype': str(handle[key].dtype)} for key in handle.keys()}
                   fmt = 'hdf5'
               schemas.append({'path': str(path.relative_to(extracted)), 'format': fmt, 'fields': fields})
           if len(schemas) != 8:
               raise RuntimeError(f'Expected 8 train/dev neural recordings, got {len(schemas)}')
           (results / 'train_dev_schemas.json').write_text(json.dumps(schemas, indent=2), encoding='utf-8')
+          print(json.dumps({'archive_receipts': archive_receipts, 'split_receipt': split_receipt, 'holdout': {'leaked': leaked}, 'schemas': schemas}, indent=2))
           PY
-
-      - name: Package source and permitted extracted records
-        run: |
-          tar -czf bio001-s26-osf-train-dev.tar.gz s26_osf
-          sha256sum bio001-s26-osf-train-dev.tar.gz > bio001-s26-osf-train-dev.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: bio001-s26-osf-train-dev
-          path: |
-            bio001-s26-osf-train-dev.tar.gz
-            bio001-s26-osf-train-dev.sha256
+          name: bio001-s26-osf-compact-receipts
+          path: s26_osf/results
           retention-days: 30
           if-no-files-found: error
