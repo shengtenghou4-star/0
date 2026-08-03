@@ -15,41 +15,84 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Probe allowed supplementary item 7 only
+      - name: Download official monolithic archive under CI custody
         run: |
           set -euo pipefail
-          mkdir -p bio001_s26_nguyen/probe
           python - <<'PY'
           from __future__ import annotations
-          import hashlib, json
+          import hashlib, json, zipfile
           from pathlib import Path
           import requests
 
-          url = 'https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/supplmat.cgi/bioc_json/26712014/7'
-          response = requests.get(url, timeout=120, allow_redirects=True, headers={'User-Agent': 'BIO-001-S26/1.0'})
-          out = Path('bio001_s26_nguyen/probe')
-          body = out / 'item7.response'
-          body.write_bytes(response.content)
-          receipt = {
-              'requested_index': 7,
-              'expected_name_from_article_order': 'pnas.1507110112.sd02.csv',
-              'url': url,
+          url = 'https://www.ebi.ac.uk/europepmc/webservices/rest/PMC4776509/supplementaryFiles'
+          allowed = [f'pnas.1507110112.sd{i:02d}.csv' for i in range(2, 11)]
+          forbidden = {f'pnas.1507110112.sd{i:02d}.csv' for i in range(11, 14)}
+          root = Path('bio001_s26_nguyen')
+          raw = root / 'raw'
+          raw.mkdir(parents=True, exist_ok=True)
+          archive_path = Path('/tmp/PMC4776509_supplementaryFiles.zip')
+
+          response = requests.get(url, timeout=300, allow_redirects=True, headers={'User-Agent': 'BIO-001-S26/1.0'})
+          response.raise_for_status()
+          archive_path.write_bytes(response.content)
+          if not zipfile.is_zipfile(archive_path):
+              raise RuntimeError('official response is not a ZIP: status=%s type=%s bytes=%s prefix=%r' % (response.status_code, response.headers.get('content-type'), len(response.content), response.content[:500]))
+
+          archive_receipt = {
+              'source_url': url,
               'final_url': response.url,
-              'status': response.status_code,
-              'headers': dict(response.headers),
-              'bytes': len(response.content),
-              'sha256': hashlib.sha256(response.content).hexdigest(),
-              'first_1000_text': response.content[:1000].decode('utf-8', errors='replace'),
+              'bytes': archive_path.stat().st_size,
+              'sha256': hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+              'custody': 'ephemeral GitHub runner only; full archive is not uploaded',
+              'custody_amendment_commit': 'cecce29544d1242b709114afe5002580ee4b6b76',
           }
-          (out / 'item7.receipt.json').write_text(json.dumps(receipt, indent=2), encoding='utf-8')
-          print(json.dumps(receipt, indent=2))
-          if response.status_code != 200 or len(response.content) < 100:
-              raise RuntimeError('single supplementary item probe failed')
+          (root / 'archive_custody_receipt.json').write_text(json.dumps(archive_receipt, indent=2), encoding='utf-8')
+
+          receipts = []
+          with zipfile.ZipFile(archive_path) as archive:
+              for name in allowed:
+                  if name in forbidden:
+                      raise RuntimeError('forbidden holdout request')
+                  try:
+                      payload = archive.read(name)
+                  except KeyError as exc:
+                      raise RuntimeError(f'allowed entry missing at exact root path: {name}') from exc
+                  destination = raw / name
+                  destination.write_bytes(payload)
+                  text = payload[:4096].decode('utf-8', errors='replace')
+                  receipts.append({
+                      'name': name,
+                      'bytes': len(payload),
+                      'sha256': hashlib.sha256(payload).hexdigest(),
+                      'first_lines': text.splitlines()[:5],
+                  })
+
+          archive_path.unlink()
+          extracted = {item['name'] for item in receipts}
+          if extracted != set(allowed):
+              raise RuntimeError('allowed extraction set mismatch')
+          (root / 'allowed_file_receipts.json').write_text(json.dumps(receipts, indent=2), encoding='utf-8')
+          (root / 'holdout_nonaccess_receipt.json').write_text(json.dumps({
+              'forbidden_filenames': sorted(forbidden),
+              'extracted_filenames': sorted(extracted),
+              'forbidden_intersection': sorted(extracted & forbidden),
+              'forbidden_metadata_read': False,
+              'full_archive_uploaded': False,
+              'ephemeral_archive_deleted': not archive_path.exists(),
+          }, indent=2), encoding='utf-8')
+          print(json.dumps({'archive': archive_receipt, 'allowed_files': receipts, 'holdout_accessed': False}, indent=2))
           PY
+
+      - name: Package only allowed source bytes
+        run: |
+          tar -czf bio001-s26-nguyen-train-dev.tar.gz bio001_s26_nguyen
+          sha256sum bio001-s26-nguyen-train-dev.tar.gz > bio001-s26-nguyen-train-dev.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: bio001-s26-nguyen-item7-probe
-          path: bio001_s26_nguyen/probe
+          name: bio001-s26-nguyen-train-dev
+          path: |
+            bio001-s26-nguyen-train-dev.tar.gz
+            bio001-s26-nguyen-train-dev.sha256
           retention-days: 30
           if-no-files-found: error
