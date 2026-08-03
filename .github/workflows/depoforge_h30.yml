@@ -1,0 +1,58 @@
+name: DepoForge H30 public transport diagnostic
+
+on:
+  push:
+    branches:
+      - transport/depoforge-h30-phase36
+    paths:
+      - '.github/workflows/depoforge_h30.yml'
+      - 'transport/depoforge_h30/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore hash-frozen public reconstruction source
+        run: |
+          python transport/depoforge_h30/restore.py
+          sha256sum transport/depoforge_h30/phase34_reconstruct_tier1.py
+
+      - name: Validate Python source and CLI contract
+        run: |
+          python -m pip install --disable-pip-version-check --quiet openpyxl
+          python -m py_compile transport/depoforge_h30/phase34_reconstruct_tier1.py
+          python transport/depoforge_h30/phase34_reconstruct_tier1.py --help \
+            | tee transport/depoforge_h30/reconstruct_help.txt
+          python - <<'PY'
+          import hashlib, json, pathlib, platform, sys
+          root = pathlib.Path('transport/depoforge_h30')
+          src = root / 'phase34_reconstruct_tier1.py'
+          receipt = {
+              'status': 'PASS',
+              'python': sys.version,
+              'platform': platform.platform(),
+              'source_bytes': src.stat().st_size,
+              'source_sha256': hashlib.sha256(src.read_bytes()).hexdigest(),
+              'expected_source_sha256': 'cc61864d37d8d011b405c2f3a2e0f8afc43555606072c7aefae5837c3b84846c',
+              'scope': 'public official-source reconstruction diagnostic only; no labels, paper text, model outputs or engineered assets',
+          }
+          (root / 'diagnostic_receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          print(json.dumps(receipt, indent=2))
+          PY
+
+      - name: Upload diagnostic receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: depoforge-h30-diagnostic
+          path: |
+            transport/depoforge_h30/diagnostic_receipt.json
+            transport/depoforge_h30/reconstruct_help.txt
+          if-no-files-found: error
+          retention-days: 7
