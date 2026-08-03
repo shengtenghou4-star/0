@@ -10,6 +10,10 @@ permissions:
 
 jobs:
   acquire-train-dev:
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -18,11 +22,14 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install --upgrade requests
-      - run: python cases/bio001-s26-nguyen/probe_replay.py
+      - name: Complete official PMC proof-of-work and acquire allowlisted CSVs
+        run: python cases/bio001-s26-nguyen/acquire_pow.py
+        env:
+          BIO001_RUNNER_ATTEMPT: ${{ matrix.attempt }}
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bio001-s26-nguyen-train-dev
+          name: bio001-s26-nguyen-attempt-${{ matrix.attempt }}
           path: cases/bio001-s26-nguyen/artifacts/
           if-no-files-found: error
           retention-days: 7
