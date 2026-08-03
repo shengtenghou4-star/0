@@ -1,0 +1,28 @@
+name: case-bio001-s26-osf
+
+on:
+  pull_request:
+    paths:
+      - 'cases/bio001-s26-osf/**'
+
+permissions:
+  contents: read
+
+jobs:
+  osf-metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --upgrade requests
+      - run: python cases/bio001-s26-osf/list_metadata.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s26-osf-metadata
+          path: cases/bio001-s26-osf/artifacts/
+          if-no-files-found: error
+          retention-days: 7
