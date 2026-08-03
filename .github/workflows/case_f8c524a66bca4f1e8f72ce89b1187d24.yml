@@ -1,0 +1,123 @@
+name: case-f8c524a66bca4f1e8f72ce89b1187d24
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/case_f8c524a66bca4f1e8f72ce89b1187d24.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixed-case:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Extract hash-audited healthy seven-port control
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p case_output
+          python -m pip install --disable-pip-version-check --quiet numpy==2.2.6
+          python - <<'PY'
+          from __future__ import annotations
+          import hashlib
+          import json
+          import pathlib
+          import urllib.parse
+          import urllib.request
+          import numpy as np
+
+          case_id = 'f8c524a66bca4f1e8f72ce89b1187d24'
+          expected_name = 'baseline.npz'
+          expected_md5 = '7b3a5b89768831fcf80942d75de84ccd'
+          root = pathlib.Path('case_output')
+          baseline = root / expected_name
+          metadata_url = 'https://rdr.kuleuven.be/api/datasets/:persistentId/?' + urllib.parse.urlencode(
+              {'persistentId': 'doi:10.48804/GDE9TW'}
+          )
+          with urllib.request.urlopen(
+              urllib.request.Request(metadata_url, headers={'User-Agent':'reference-matrix/1.0','Accept':'application/json'}),
+              timeout=180,
+          ) as response:
+              metadata = json.load(response)
+          rows = metadata['data']['latestVersion']['files']
+          matches = [row for row in rows if row.get('label') == expected_name]
+          if len(matches) != 1:
+              raise SystemExit(f'Expected one {expected_name}, found {len(matches)}')
+          data_file = matches[0]['dataFile']
+          file_id = int(data_file['id'])
+          checksum = data_file.get('checksum', {})
+          if checksum.get('type') != 'MD5' or checksum.get('value', '').lower() != expected_md5:
+              raise SystemExit(f'Official checksum mismatch: {checksum}')
+          md5 = hashlib.md5(usedforsecurity=False)
+          sha256 = hashlib.sha256()
+          size = 0
+          request = urllib.request.Request(
+              f'https://rdr.kuleuven.be/api/access/datafile/{file_id}',
+              headers={'User-Agent':'reference-matrix/1.0'},
+          )
+          with urllib.request.urlopen(request, timeout=300) as response, baseline.open('wb') as output:
+              while True:
+                  chunk = response.read(1024 * 1024)
+                  if not chunk:
+                      break
+                  output.write(chunk)
+                  md5.update(chunk)
+                  sha256.update(chunk)
+                  size += len(chunk)
+          if md5.hexdigest() != expected_md5:
+              raise SystemExit(f'Baseline MD5 mismatch: {md5.hexdigest()}')
+
+          with np.load(baseline, allow_pickle=False) as archive:
+              frequency = np.asarray(archive['frequency'], dtype=np.float64).reshape(-1)
+              probing_nodes = np.asarray(archive['probing_nodes']).astype(int).reshape(-1)
+              node_position = np.asarray(archive['node_position'], dtype=np.float64)
+              full_frf = np.asarray(archive['frf'])
+              healthy = full_frf[:, probing_nodes, :]
+          if healthy.shape != (7, 7, 8192):
+              raise SystemExit(f'Unexpected healthy square shape: {healthy.shape}')
+          if not np.array_equal(frequency, np.linspace(0.0, 1600.0, 8192)):
+              raise SystemExit('Official frequency vector differs from exact frozen grid')
+
+          extracted = root / 'healthy_7port_control.npz'
+          np.savez_compressed(
+              extracted,
+              frf=healthy,
+              frequency=frequency,
+              probing_nodes=probing_nodes,
+              probing_positions=node_position[probing_nodes],
+          )
+          receipt = {
+              'schema': 'reference-matrix-lmsd-healthy-control-v1',
+              'case': case_id,
+              'dataset_doi': '10.48804/GDE9TW',
+              'baseline_file_id': file_id,
+              'baseline_bytes': size,
+              'baseline_md5': md5.hexdigest(),
+              'baseline_sha256': sha256.hexdigest(),
+              'extraction_rule': 'baseline frf[:, probing_nodes, :] with official zero-based probing_nodes',
+              'healthy_shape': list(healthy.shape),
+              'frequency_bins': int(frequency.size),
+              'probing_nodes_zero_based': probing_nodes.tolist(),
+              'control_sha256': hashlib.sha256(extracted.read_bytes()).hexdigest(),
+              'control_bytes': extracted.stat().st_size,
+              'scope': 'public healthy seven-port control only; full 7x144 baseline deleted before upload',
+              'verified': True,
+          }
+          (root / 'HEALTHY_CONTROL_RECEIPT.json').write_text(
+              json.dumps(receipt, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+          )
+          baseline.unlink()
+          print(json.dumps(receipt, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload healthy seven-port control
+        uses: actions/upload-artifact@v4
+        with:
+          name: case-f8c524a66bca4f1e8f72ce89b1187d24
+          path: case_output/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
