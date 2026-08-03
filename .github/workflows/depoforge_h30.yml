@@ -1,4 +1,4 @@
-name: DepoForge H30 public transport diagnostic
+name: DepoForge official H30 transport
 
 on:
   push:
@@ -19,46 +19,156 @@ permissions:
   contents: read
 
 jobs:
-  diagnostic:
+  h30:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
       - name: Restore hash-frozen public reconstruction source
         run: |
+          set -euo pipefail
           python transport/depoforge_h30/restore.py
-          sha256sum transport/depoforge_h30/phase34_reconstruct_tier1.py
-
-      - name: Validate Python source and CLI contract
-        run: |
-          python -m pip install --disable-pip-version-check --quiet openpyxl
+          echo 'cc61864d37d8d011b405c2f3a2e0f8afc43555606072c7aefae5837c3b84846c  transport/depoforge_h30/phase34_reconstruct_tier1.py' | sha256sum -c -
           python -m py_compile transport/depoforge_h30/phase34_reconstruct_tier1.py
-          python transport/depoforge_h30/phase34_reconstruct_tier1.py --help \
-            | tee transport/depoforge_h30/reconstruct_help.txt
+
+      - name: Download and verify five official Springer Nature workbooks
+        run: |
+          set -euo pipefail
+          mkdir -p work/official work/output
+          base='https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41467-026-73570-7/MediaObjects'
+          curl -fL --retry 5 --retry-all-errors "$base/41467_2026_73570_MOESM3_ESM.xlsx" -o work/official/depo_supp1.xlsx
+          curl -fL --retry 5 --retry-all-errors "$base/41467_2026_73570_MOESM4_ESM.xlsx" -o work/official/depo_supp2.xlsx
+          curl -fL --retry 5 --retry-all-errors "$base/41467_2026_73570_MOESM5_ESM.xlsx" -o work/official/depo_supp3.xlsx
+          curl -fL --retry 5 --retry-all-errors "$base/41467_2026_73570_MOESM6_ESM.xlsx" -o work/official/depo_supp4.xlsx
+          curl -fL --retry 5 --retry-all-errors "$base/41467_2026_73570_MOESM7_ESM.xlsx" -o work/official/depo_supp5.xlsx
+          cat > work/official/EXPECTED.sha256 <<'EOF'
+          759bbbb27dcab2f2b2f0ebb1f1757c741592b740cef4a6d260a4a5c734c4a8d7  work/official/depo_supp1.xlsx
+          83b2d545ecc9d442ab2408e8020f657ffaec867717af98a69198b8e204b21841  work/official/depo_supp2.xlsx
+          c4e76b52dfd23323e5e9e24dce7315ecaf3d2d1de905bc60f0f3414a58d1bb39  work/official/depo_supp3.xlsx
+          85819afee5e8809bab55e28cd8a63df285131882fa9ca7bf644365e842e17162  work/official/depo_supp4.xlsx
+          7d21f3b0b64b1c346ab9fe8a8d6b65102f842e616e29b74ed40209687218f043  work/official/depo_supp5.xlsx
+          EOF
+          sha256sum -c work/official/EXPECTED.sha256 | tee work/output/source_sha256_check.txt
+
+      - name: Reconstruct exact public 90-enzyme table and FASTA
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --quiet openpyxl
+          python transport/depoforge_h30/phase34_reconstruct_tier1.py \
+            --source-dir work/official \
+            --table work/output/depolymerases_90.csv \
+            --source-manifest work/output/source_manifest.csv \
+            --boundary-audit work/output/domain_boundary_audit.csv \
+            --receipt work/output/reconstruction_receipt.json
+          echo 'bf8fa49ae4d752cea728a6bd4e9f80fda192645fed04bc8a6c59916033dabffe  work/output/depolymerases_90.csv' | sha256sum -c -
           python - <<'PY'
-          import hashlib, json, pathlib, platform, sys
-          root = pathlib.Path('transport/depoforge_h30')
-          src = root / 'phase34_reconstruct_tier1.py'
-          receipt = {
-              'status': 'PASS',
-              'python': sys.version,
-              'platform': platform.platform(),
-              'source_bytes': src.stat().st_size,
-              'source_sha256': hashlib.sha256(src.read_bytes()).hexdigest(),
-              'expected_source_sha256': 'cc61864d37d8d011b405c2f3a2e0f8afc43555606072c7aefae5837c3b84846c',
-              'scope': 'public official-source reconstruction diagnostic only; no labels, paper text, model outputs or engineered assets',
-          }
-          (root / 'diagnostic_receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          import csv, hashlib, json
+          from pathlib import Path
+          table = Path('work/output/depolymerases_90.csv')
+          fasta = Path('work/output/depolymerases_90.fasta')
+          with table.open(encoding='utf-8', newline='') as fh:
+              rows = list(csv.DictReader(fh))
+          if len(rows) != 90 or len({r['name'] for r in rows}) != 90:
+              raise SystemExit('canonical table identity failure')
+          if sum(int(r['broad']) for r in rows) != 24:
+              raise SystemExit('canonical label count failure')
+          fasta.write_text(''.join(f">{r['name']}\n{r['full_sequence'].strip().upper()}\n" for r in sorted(rows, key=lambda x: x['name'])), encoding='utf-8')
+          digest = hashlib.sha256(fasta.read_bytes()).hexdigest()
+          expected = 'c787293360258721e5e48ce069a4af9eabcb0c9793fa820a17e6e57913dd14ea'
+          if digest != expected:
+              raise SystemExit(f'FASTA digest mismatch: {digest}')
+          receipt = {'status':'PASS','entries':90,'table_sha256':hashlib.sha256(table.read_bytes()).hexdigest(),'fasta_sha256':digest,'expected_fasta_sha256':expected}
+          Path('work/output/fasta_receipt.json').write_text(json.dumps(receipt, indent=2) + '\n', encoding='utf-8')
           print(json.dumps(receipt, indent=2))
           PY
 
-      - name: Upload diagnostic receipt
+      - name: Download and verify official MMseqs2 AVX2 release
+        run: |
+          set -euo pipefail
+          curl -fL --retry 5 --retry-all-errors \
+            'https://github.com/soedinglab/MMseqs2/releases/download/18-8cc5c/mmseqs-linux-avx2.tar.gz' \
+            -o work/mmseqs-linux-avx2.tar.gz
+          echo 'bd9b0234da5949ad528d5b5f9ea4cda9c1e23dce14b46c0791d4d919a76e61ce  work/mmseqs-linux-avx2.tar.gz' | sha256sum -c -
+          mkdir -p work/mmseqs_extract
+          tar -xzf work/mmseqs-linux-avx2.tar.gz -C work/mmseqs_extract
+          MMSEQS=$(find work/mmseqs_extract -type f -path '*/bin/mmseqs' -perm -u+x | head -n 1)
+          test -n "$MMSEQS"
+          echo "$MMSEQS" > work/output/mmseqs_path.txt
+          "$MMSEQS" version | tee work/output/mmseqs_version.txt
+          sha256sum "$MMSEQS" | tee work/output/mmseqs_binary.sha256
+          sha256sum work/mmseqs-linux-avx2.tar.gz > work/output/mmseqs_archive.sha256
+
+      - name: Execute exact frozen H30 contract
+        run: |
+          set -euo pipefail
+          MMSEQS=$(cat work/output/mmseqs_path.txt)
+          "$MMSEQS" easy-cluster \
+            work/output/depolymerases_90.fasta \
+            work/output/h30 \
+            work/mmseqs_tmp \
+            --min-seq-id 0.30 \
+            -c 0.80 \
+            --cov-mode 0 \
+            --cluster-mode 2
+          python - <<'PY'
+          import csv, hashlib, json
+          from collections import Counter
+          from pathlib import Path
+          fasta = Path('work/output/depolymerases_90.fasta')
+          cluster_tsv = Path('work/output/h30_cluster.tsv')
+          names = [line[1:].strip() for line in fasta.read_text(encoding='utf-8').splitlines() if line.startswith('>')]
+          mapping = {}
+          with cluster_tsv.open(encoding='utf-8') as fh:
+              for line in fh:
+                  representative, member = line.rstrip('\n').split('\t')[:2]
+                  if member in mapping and mapping[member] != representative:
+                      raise SystemExit(f'conflicting family assignment: {member}')
+                  mapping[member] = representative
+          if set(mapping) != set(names) or len(mapping) != 90:
+              raise SystemExit(f'H30 coverage failure missing={sorted(set(names)-set(mapping))} extra={sorted(set(mapping)-set(names))}')
+          out = Path('work/output/h30_families.csv')
+          with out.open('w', encoding='utf-8', newline='') as fh:
+              writer = csv.DictWriter(fh, fieldnames=['name','family_id'])
+              writer.writeheader()
+              for name in sorted(mapping): writer.writerow({'name':name,'family_id':mapping[name]})
+          sizes = Counter(mapping.values())
+          version = Path('work/output/mmseqs_version.txt').read_text(encoding='utf-8').strip()
+          binary_sha = Path('work/output/mmseqs_binary.sha256').read_text(encoding='utf-8').split()[0]
+          archive_sha = Path('work/output/mmseqs_archive.sha256').read_text(encoding='utf-8').split()[0]
+          receipt = {
+              'status':'PASS',
+              'members':len(mapping),
+              'families':len(sizes),
+              'singleton_families':sum(v==1 for v in sizes.values()),
+              'largest_family_size':max(sizes.values()),
+              'family_size_histogram':dict(sorted(Counter(sizes.values()).items())),
+              'mmseqs_version':version,
+              'mmseqs_binary_sha256':binary_sha,
+              'mmseqs_archive_sha256':archive_sha,
+              'command':'easy-cluster --min-seq-id 0.30 -c 0.80 --cov-mode 0 --cluster-mode 2',
+              'input_fasta_sha256':hashlib.sha256(fasta.read_bytes()).hexdigest(),
+              'cluster_tsv_sha256':hashlib.sha256(cluster_tsv.read_bytes()).hexdigest(),
+              'family_csv_sha256':hashlib.sha256(out.read_bytes()).hexdigest(),
+              'scope':'official public sequences and H30 family assignments only; no manuscript or engineered assets'
+          }
+          Path('work/output/h30_receipt.json').write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          print(json.dumps(receipt, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload H30 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: depoforge-h30-diagnostic
+          name: depoforge-official-h30
           path: |
-            transport/depoforge_h30/diagnostic_receipt.json
-            transport/depoforge_h30/reconstruct_help.txt
+            work/output/source_sha256_check.txt
+            work/output/reconstruction_receipt.json
+            work/output/fasta_receipt.json
+            work/output/mmseqs_version.txt
+            work/output/mmseqs_binary.sha256
+            work/output/mmseqs_archive.sha256
+            work/output/h30_cluster.tsv
+            work/output/h30_families.csv
+            work/output/h30_receipt.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
