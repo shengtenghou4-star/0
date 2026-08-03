@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install --upgrade pip numpy scipy scikit-learn h5py requests
-      - run: python cases/16ea58b925aa10dfbb25ac9f1dabdb91/run.py
+      - run: python cases/16ea58b925aa10dfbb25ac9f1dabdb91/execute.py
       - if: always()
         uses: actions/upload-artifact@v4
         with:
