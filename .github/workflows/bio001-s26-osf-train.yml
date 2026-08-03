@@ -23,7 +23,7 @@ jobs:
 
       - name: Train and freeze behavior-only and neural-behavior models
         run: |
-          python tools/bio001_s26/train_hallinen.py \
+          python tools/bio001_s26/train_hallinen_v2.py \
             --extracted-root s26_train/extracted \
             --split-receipt s26_train/results/split_receipt.json \
             --archive-receipts s26_train/results/archive_receipts.json \
