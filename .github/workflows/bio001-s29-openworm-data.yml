@@ -73,7 +73,6 @@ jobs:
                       id=target["google_drive_id"],
                       output=str(output),
                       quiet=False,
-                      fuzzy=True,
                       resume=False,
                   )
                   if result is None or not output.exists():
