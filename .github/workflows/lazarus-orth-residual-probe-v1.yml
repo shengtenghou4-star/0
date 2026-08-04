@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/lazarus-orth-residual-probe-v1.yml"
-      - "lazarus-public-compute/lazarus_orth_residual_compute.py"
+      - "lazarus-public-compute/payload/lazarus_orth_residual_compute.py.gz.b64"
       - "lazarus-public-compute/payload/lazarus_public_compute.py.gz.b64"
       - "lazarus-public-compute/frozen/primary_family_components_v1.csv"
       - "cases/7838a640602a3a78463d52e06e2a614a/fetch_archive.py"
@@ -24,14 +24,19 @@ jobs:
           python-version: "3.12"
       - name: Install frozen runtime
         run: python -m pip install "numpy==2.3.2" "scipy==1.16.1" "scikit-learn==1.7.1" --quiet --progress-bar off
-      - name: Decode reviewed reconstruction payload
+      - name: Decode exact reviewed payloads
         run: |
           python - <<'PY'
           import base64, gzip
           from pathlib import Path
-          source = Path('lazarus-public-compute/payload/lazarus_public_compute.py.gz.b64')
-          target = Path('lazarus-public-compute/lazarus_public_compute.py')
-          target.write_bytes(gzip.decompress(base64.b64decode(source.read_text().strip())))
+          pairs = [
+              ('lazarus-public-compute/payload/lazarus_public_compute.py.gz.b64', 'lazarus-public-compute/lazarus_public_compute.py'),
+              ('lazarus-public-compute/payload/lazarus_orth_residual_compute.py.gz.b64', 'lazarus-public-compute/lazarus_orth_residual_compute.py'),
+          ]
+          for source_name, target_name in pairs:
+              source = Path(source_name)
+              target = Path(target_name)
+              target.write_bytes(gzip.decompress(base64.b64decode(source.read_text().strip())))
           PY
       - name: Restore exact CATNAP 2026-07 public inputs
         run: python cases/7838a640602a3a78463d52e06e2a614a/fetch_archive.py
@@ -49,6 +54,7 @@ jobs:
                       h.update(block)
               return h.hexdigest()
           paths = {
+              'runner_payload': Path('lazarus-public-compute/payload/lazarus_orth_residual_compute.py.gz.b64'),
               'runner': Path('lazarus-public-compute/lazarus_orth_residual_compute.py'),
               'legacy_payload': Path('lazarus-public-compute/lazarus_public_compute.py'),
               'family_graph': Path('lazarus-public-compute/frozen/primary_family_components_v1.csv'),
@@ -57,6 +63,7 @@ jobs:
           }
           hashes = {name: sha(path) for name, path in paths.items()}
           expected = {
+              'runner_payload': '537f4bf77a10d8d707b3a21ad6a71947827d925494cd42470369a6cfa26552f9',
               'runner': '42c284c9f06f713a59443fae04987292b6fc39ff1de1f85e903207c6857a8c33',
               'legacy_payload': '7429d615a4fcbcff529270ed25dbfb6e1395b07883dda59d4f9317724bfd6a2c',
               'assay': 'e6b575e0785b43c5dbd84b7ef3eb08e2d072fa32117d1ad0bdd31eb5e243bdd2',
