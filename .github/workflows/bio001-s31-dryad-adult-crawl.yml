@@ -1,0 +1,55 @@
+name: BIO-001 S31 Dryad adult crawling transport
+
+on:
+  push:
+    branches:
+      - bio001-s31-dryad-adult-crawl-20260804
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Acquire frozen Dryad archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/extracted
+          curl --fail --location --retry 5 --retry-all-errors \
+            --user-agent 'BIO-001-reproducibility-audit/1.0' \
+            'https://datadryad.org/downloads/file_stream/2876840' \
+            --output artifacts/dryad.zip
+          sha256sum artifacts/dryad.zip | tee artifacts/SHA256SUMS.txt
+          stat --printf='%s\n' artifacts/dryad.zip | tee artifacts/BYTES.txt
+          unzip -t artifacts/dryad.zip
+          unzip -q artifacts/dryad.zip -d artifacts/extracted
+          find artifacts/extracted -type f -printf='%P\n' | LC_ALL=C sort > artifacts/FILE_LIST.txt
+          python - <<'PY'
+          from pathlib import Path
+          paths=[p for p in Path('artifacts/extracted').rglob('*') if p.is_file()]
+          eligible=[]
+          for p in paths:
+              q=p.as_posix().lower()
+              if p.suffix.lower()=='.txt' and 'adult' in q and ('crawl' in q or 'crawling' in q):
+                  eligible.append(p)
+          Path('artifacts/ELIGIBLE_FILE_LIST.txt').write_text('\n'.join(sorted(p.as_posix() for p in eligible))+'\n')
+          print('eligible',len(eligible))
+          if len(eligible)<5:
+              raise SystemExit('fewer than five preregistered adult crawling text files')
+          PY
+
+      - name: Upload raw archive and extracted text files
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s31-dryad-adult-crawl
+          path: artifacts/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
