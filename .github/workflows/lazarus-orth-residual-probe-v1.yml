@@ -40,6 +40,18 @@ jobs:
             'load_antibody_sequences','load_virus_sequences','selected_embeddings',
             'joint_feature_matrix','evaluate_predictions','candidate_summary','write_csv'
           ]
-          print(json.dumps({name: hasattr(module, name) for name in wanted}, sort_keys=True))
-          print(json.dumps({'public_names': sorted(name for name in vars(module) if not name.startswith('_'))}, sort_keys=True))
+          result = {
+            'wanted': {name: hasattr(module, name) for name in wanted},
+            'public_names': sorted(name for name in vars(module) if not name.startswith('_')),
+          }
+          Path('lazarus-public-compute/payload-interface.json').write_text(json.dumps(result, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(result['wanted'], sort_keys=True))
           PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazarus-reviewed-public-payload-interface
+          path: |
+            lazarus-public-compute/lazarus_public_compute.py
+            lazarus-public-compute/payload-interface.json
+          if-no-files-found: error
+          retention-days: 1
