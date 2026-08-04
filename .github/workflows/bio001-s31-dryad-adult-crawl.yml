@@ -17,49 +17,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Acquire frozen Dryad archive
+      - name: Acquire frozen Dryad archive from official Zenodo mirror
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p artifacts/extracted
-          python - <<'PY'
-          import pathlib, requests
-          urls = [
-              'https://datadryad.org/api/v2/datasets/doi%3A10.5061%2Fdryad.stqjq2c8p/download',
-              'https://datadryad.org/api/v2/datasets/doi%253A10.5061%252Fdryad.stqjq2c8p/download',
-          ]
-          headers={'User-Agent':'BIO-001-reproducibility-audit/1.0','Accept':'application/zip,application/octet-stream,*/*'}
-          diagnostics=[]
-          output=pathlib.Path('artifacts/dryad_dataset.zip')
-          for url in urls:
-              try:
-                  response=requests.get(url,headers=headers,timeout=180,allow_redirects=True)
-                  diagnostics.append({'url':url,'status':response.status_code,'final_url':response.url,'bytes':len(response.content),'content_type':response.headers.get('content-type')})
-                  if response.ok and len(response.content)>100000 and response.content[:2]==b'PK':
-                      output.write_bytes(response.content)
-                      break
-              except Exception as exc:
-                  diagnostics.append({'url':url,'error':repr(exc)})
-          pathlib.Path('artifacts/TRANSPORT_DIAGNOSTICS.json').write_text(__import__('json').dumps(diagnostics,indent=2)+'\n')
-          if not output.exists():
-              raise SystemExit('Dryad API package download failed')
-          PY
-          sha256sum artifacts/dryad_dataset.zip | tee artifacts/SHA256SUMS.txt
-          stat --printf='%s\n' artifacts/dryad_dataset.zip | tee artifacts/BYTES.txt
-          unzip -t artifacts/dryad_dataset.zip
-          unzip -q artifacts/dryad_dataset.zip -d artifacts/extracted
+          curl --fail --location --retry 5 --retry-all-errors \
+            --user-agent 'BIO-001-reproducibility-audit/1.0' \
+            'https://zenodo.org/records/10594259/files/dryad.zip?download=1' \
+            --output artifacts/dryad.zip
+          echo '571f6cd67f9d77ee3a1ad04684b2afc2  artifacts/dryad.zip' | md5sum --check
+          sha256sum artifacts/dryad.zip | tee artifacts/SHA256SUMS.txt
+          md5sum artifacts/dryad.zip | tee artifacts/MD5SUMS.txt
+          stat --printf='%s\n' artifacts/dryad.zip | tee artifacts/BYTES.txt
+          unzip -t artifacts/dryad.zip
+          unzip -q artifacts/dryad.zip -d artifacts/extracted
+          find artifacts/extracted -type f -printf='%P\n' | LC_ALL=C sort > artifacts/FILE_LIST.txt
           python - <<'PY'
           from pathlib import Path
-          import zipfile
           root=Path('artifacts/extracted')
-          # The DOI package may wrap the published dryad.zip as a file; extract every nested ZIP once.
-          for nested in list(root.rglob('*.zip')):
-              target=nested.with_suffix('')
-              target.mkdir(parents=True,exist_ok=True)
-              with zipfile.ZipFile(nested) as archive:
-                  archive.extractall(target)
           paths=[p for p in root.rglob('*') if p.is_file()]
-          Path('artifacts/FILE_LIST.txt').write_text('\n'.join(sorted(p.relative_to(root).as_posix() for p in paths))+'\n')
           eligible=[]
           for p in paths:
               q=p.relative_to(root).as_posix().lower()
