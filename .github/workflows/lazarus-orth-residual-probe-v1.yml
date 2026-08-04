@@ -1,57 +1,89 @@
-name: LAZARUS orth-residual interface probe v1
+name: LAZARUS orth-residual execution preflight v1
 
 on:
   pull_request:
     paths:
       - ".github/workflows/lazarus-orth-residual-probe-v1.yml"
-      - "lazarus-public-compute/**"
+      - "lazarus-public-compute/lazarus_orth_residual_compute.py"
+      - "lazarus-public-compute/payload/lazarus_public_compute.py.gz.b64"
+      - "lazarus-public-compute/frozen/primary_family_components_v1.csv"
+      - "cases/7838a640602a3a78463d52e06e2a614a/fetch_archive.py"
 
 permissions:
   contents: read
 
 jobs:
-  inspect-public-payload:
+  preflight:
     if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install import runtime
+      - name: Install frozen runtime
         run: python -m pip install "numpy==2.3.2" "scipy==1.16.1" "scikit-learn==1.7.1" --quiet --progress-bar off
-      - name: Decode and inspect reviewed payload
+      - name: Decode reviewed reconstruction payload
         run: |
           python - <<'PY'
-          import base64, gzip, importlib.util, json, sys
+          import base64, gzip
           from pathlib import Path
           source = Path('lazarus-public-compute/payload/lazarus_public_compute.py.gz.b64')
           target = Path('lazarus-public-compute/lazarus_public_compute.py')
           target.write_bytes(gzip.decompress(base64.b64decode(source.read_text().strip())))
-          spec = importlib.util.spec_from_file_location('legacy', target)
-          module = importlib.util.module_from_spec(spec)
-          assert spec and spec.loader
-          sys.modules[spec.name] = module
-          spec.loader.exec_module(module)
-          wanted = [
-            'DEFAULT_SEEDS','POTENT_CUTOFF','RESISTANT_CUTOFF','PairRow',
-            'read_json','read_pairs','sha256','check_dual_cold','feature_tables',
-            'load_antibody_sequences','load_virus_sequences','selected_embeddings',
-            'joint_feature_matrix','evaluate_predictions','candidate_summary','write_csv'
-          ]
-          result = {
-            'wanted': {name: hasattr(module, name) for name in wanted},
-            'public_names': sorted(name for name in vars(module) if not name.startswith('_')),
+          PY
+      - name: Restore exact CATNAP 2026-07 public inputs
+        run: python cases/7838a640602a3a78463d52e06e2a614a/fetch_archive.py
+      - name: Run synthetic orthogonality and novelty tests
+        run: python lazarus-public-compute/lazarus_orth_residual_compute.py --self-test
+      - name: Seal execution preflight receipt
+        run: |
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          def sha(path):
+              h = hashlib.sha256()
+              with Path(path).open('rb') as f:
+                  for block in iter(lambda: f.read(1 << 20), b''):
+                      h.update(block)
+              return h.hexdigest()
+          paths = {
+              'runner': Path('lazarus-public-compute/lazarus_orth_residual_compute.py'),
+              'legacy_payload': Path('lazarus-public-compute/lazarus_public_compute.py'),
+              'family_graph': Path('lazarus-public-compute/frozen/primary_family_components_v1.csv'),
+              'assay': Path('cases/7838a640602a3a78463d52e06e2a614a/artifacts/catnap-2026-07-01/assay_2026-07-01.txt'),
+              'virus_fasta': Path('cases/7838a640602a3a78463d52e06e2a614a/artifacts/catnap-2026-07-01/virseqs_aa_O_2026-07-01.fasta'),
           }
-          Path('lazarus-public-compute/payload-interface.json').write_text(json.dumps(result, indent=2, sort_keys=True) + '\n')
-          print(json.dumps(result['wanted'], sort_keys=True))
+          hashes = {name: sha(path) for name, path in paths.items()}
+          expected = {
+              'runner': '42c284c9f06f713a59443fae04987292b6fc39ff1de1f85e903207c6857a8c33',
+              'legacy_payload': '7429d615a4fcbcff529270ed25dbfb6e1395b07883dda59d4f9317724bfd6a2c',
+              'assay': 'e6b575e0785b43c5dbd84b7ef3eb08e2d072fa32117d1ad0bdd31eb5e243bdd2',
+              'virus_fasta': '9c83b868d7159ad6148f628878027ccbaf2e07131baf4efd3221f1aa8ec568cf',
+          }
+          for name, value in expected.items():
+              assert hashes[name] == value, (name, hashes[name], value)
+          receipt = {
+              'schema_version': '1.0',
+              'status': 'PREFLIGHT_PASS',
+              'public_compute': True,
+              'private_bytes_read': 0,
+              'confirmation_targets_read': 0,
+              'model_fits': 0,
+              'authorized_future_model_fits': 25,
+              'adaptive_expansion_allowed': 0,
+              'hashes': hashes,
+              'files': {name: {'bytes': path.stat().st_size, 'sha256': hashes[name]} for name, path in paths.items()},
+          }
+          out = Path('lazarus-public-compute/preflight-artifacts')
+          out.mkdir(parents=True, exist_ok=True)
+          (out / 'PUBLIC_ORTHOGONAL_PREFLIGHT_RECEIPT.json').write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(receipt, sort_keys=True))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: lazarus-reviewed-public-payload-interface
-          path: |
-            lazarus-public-compute/lazarus_public_compute.py
-            lazarus-public-compute/payload-interface.json
+          name: lazarus-orth-residual-preflight-v1
+          path: lazarus-public-compute/preflight-artifacts/
           if-no-files-found: error
           retention-days: 1
