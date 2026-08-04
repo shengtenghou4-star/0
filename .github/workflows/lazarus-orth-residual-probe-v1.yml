@@ -1,0 +1,44 @@
+name: LAZARUS orth-residual interface probe v1
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/lazarus-orth-residual-probe-v1.yml"
+      - "lazarus-public-compute/**"
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-public-payload:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install import runtime
+        run: python -m pip install "numpy==2.3.2" "scipy==1.16.1" "scikit-learn==1.7.1" --quiet --progress-bar off
+      - name: Decode and inspect reviewed payload
+        run: |
+          python - <<'PY'
+          import base64, gzip, importlib.util, json
+          from pathlib import Path
+          source = Path('lazarus-public-compute/payload/lazarus_public_compute.py.gz.b64')
+          target = Path('lazarus-public-compute/lazarus_public_compute.py')
+          target.write_bytes(gzip.decompress(base64.b64decode(source.read_text().strip())))
+          spec = importlib.util.spec_from_file_location('legacy', target)
+          module = importlib.util.module_from_spec(spec)
+          assert spec and spec.loader
+          spec.loader.exec_module(module)
+          wanted = [
+            'DEFAULT_SEEDS','POTENT_CUTOFF','RESISTANT_CUTOFF','PairRow',
+            'read_json','read_pairs','sha256','check_dual_cold','feature_tables',
+            'load_antibody_sequences','load_virus_sequences','selected_embeddings',
+            'joint_feature_matrix','evaluate_predictions','candidate_summary','write_csv'
+          ]
+          print(json.dumps({name: hasattr(module, name) for name in wanted}, sort_keys=True))
+          print(json.dumps({'public_names': sorted(name for name in vars(module) if not name.startswith('_'))}, sort_keys=True))
+          PY
