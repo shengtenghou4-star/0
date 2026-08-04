@@ -24,7 +24,7 @@ jobs:
       - name: Decode and inspect reviewed payload
         run: |
           python - <<'PY'
-          import base64, gzip, importlib.util, json
+          import base64, gzip, importlib.util, json, sys
           from pathlib import Path
           source = Path('lazarus-public-compute/payload/lazarus_public_compute.py.gz.b64')
           target = Path('lazarus-public-compute/lazarus_public_compute.py')
@@ -32,6 +32,7 @@ jobs:
           spec = importlib.util.spec_from_file_location('legacy', target)
           module = importlib.util.module_from_spec(spec)
           assert spec and spec.loader
+          sys.modules[spec.name] = module
           spec.loader.exec_module(module)
           wanted = [
             'DEFAULT_SEEDS','POTENT_CUTOFF','RESISTANT_CUTOFF','PairRow',
