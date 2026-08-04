@@ -1,0 +1,32 @@
+name: case-7838a640602a3a78463d52e06e2a614a
+
+on:
+  pull_request:
+    paths:
+      - 'cases/7838a640602a3a78463d52e06e2a614a/**'
+
+permissions:
+  contents: read
+
+jobs:
+  fixed-case:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      LAZARUS_REPO_TOKEN: ${{ secrets.LAZARUS_REPO_TOKEN }}
+      PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+      REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python cases/7838a640602a3a78463d52e06e2a614a/run.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: case-7838a640602a3a78463d52e06e2a614a
+          path: cases/7838a640602a3a78463d52e06e2a614a/artifacts/
+          if-no-files-found: error
+          retention-days: 1
