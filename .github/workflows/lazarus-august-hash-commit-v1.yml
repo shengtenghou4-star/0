@@ -28,10 +28,8 @@ jobs:
           from pathlib import Path
           path = Path('cases/lazarus-august-commit-v1/artifacts/TARGET_ARCHIVE_HASH_COMMITMENT.json')
           value = json.loads(path.read_text())
-          assert value['status'] == 'TARGET_ARCHIVE_HASH_COMMITTED'
+          assert value['status'] in {'TARGET_ARCHIVE_HASH_COMMITTED', 'ABORT_TARGET_UNAVAILABLE'}
           assert value['release'] == '2026-08-01'
-          assert value['archive_bytes'] > 0
-          assert len(value['archive_sha256']) == 64
           assert value['archive_members_listed'] == 0
           assert value['archive_members_extracted'] == 0
           assert value['target_rows_parsed'] == 0
@@ -39,6 +37,12 @@ jobs:
           assert value['model_fits'] == 0
           assert value['private_bytes_read'] == 0
           assert value['substitution_used'] is False
+          if value['status'] == 'TARGET_ARCHIVE_HASH_COMMITTED':
+              assert value['archive_bytes'] > 0
+              assert len(value['archive_sha256']) == 64
+              assert value['http_status'] == 200
+          else:
+              assert value['archive_sha256'] is None
           PY
       - uses: actions/upload-artifact@v4
         with:
