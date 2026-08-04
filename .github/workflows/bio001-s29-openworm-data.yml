@@ -1,0 +1,144 @@
+name: BIO-001 S29 OpenWorm real data transport
+
+on:
+  push:
+    branches:
+      - bio001-s29-transport-20260804
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Install transport and MAT validators
+        run: |
+          python -m pip install --disable-pip-version-check --quiet gdown scipy h5py
+
+      - name: Download frozen OpenWorm files and write manifest
+        id: acquire
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          python - <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import traceback
+
+          import gdown
+          import h5py
+          import scipy.io
+
+          targets = [
+              {
+                  "role": "primary_real_normalized_recording",
+                  "filename": "example_video_norm_worm.mat",
+                  "google_drive_id": "0B7to9gBdZEyGakg5U3loVUktRm8",
+                  "required": True,
+              },
+              {
+                  "role": "secondary_feature_crosscheck",
+                  "filename": "example_video_feature_file.mat",
+                  "google_drive_id": "0B7to9gBdZEyGX2tFQ1JyRzdUYUE",
+                  "required": False,
+              },
+              {
+                  "role": "raw_contour_skeleton_provenance",
+                  "filename": "example_contour_and_skeleton_info.mat",
+                  "google_drive_id": "0B7to9gBdZEyGWVAzUlYwbk1ad0E",
+                  "required": False,
+              },
+          ]
+
+          manifest = {
+              "schema": "bio-001-s29-openworm-transport-v1",
+              "source_repository": "openworm/open-worm-analysis-toolbox",
+              "source_commit": "181ab132111d74ec61f7cd33f8992d141e96c0d1",
+              "files": [],
+          }
+
+          for target in targets:
+              output = pathlib.Path("artifacts") / target["filename"]
+              record = dict(target)
+              try:
+                  result = gdown.download(
+                      id=target["google_drive_id"],
+                      output=str(output),
+                      quiet=False,
+                      fuzzy=True,
+                      resume=False,
+                  )
+                  if result is None or not output.exists():
+                      raise RuntimeError("gdown returned no file")
+                  size = output.stat().st_size
+                  if size < 1024:
+                      raise RuntimeError(f"downloaded file too small: {size} bytes")
+                  digest = hashlib.sha256(output.read_bytes()).hexdigest()
+                  validation = {"kind": None, "top_level": []}
+                  try:
+                      validation["kind"] = "mat_v5_or_earlier"
+                      validation["top_level"] = [
+                          {"name": name, "shape": list(shape), "class": cls}
+                          for name, shape, cls in scipy.io.whosmat(output)
+                      ]
+                  except Exception as scipy_error:
+                      try:
+                          with h5py.File(output, "r") as handle:
+                              validation["kind"] = "mat_v7_3_hdf5"
+                              validation["top_level"] = sorted(handle.keys())
+                      except Exception as h5_error:
+                          raise RuntimeError(
+                              f"not a readable MATLAB file; scipy={scipy_error!r}; h5py={h5_error!r}"
+                          )
+                  record.update({
+                      "status": "PASS",
+                      "bytes": size,
+                      "sha256": digest,
+                      "validation": validation,
+                  })
+              except Exception as error:
+                  record.update({
+                      "status": "FAIL",
+                      "error": repr(error),
+                      "traceback": traceback.format_exc(),
+                  })
+                  if output.exists():
+                      record["partial_bytes"] = output.stat().st_size
+              manifest["files"].append(record)
+
+          primary = next(item for item in manifest["files"] if item["required"])
+          manifest["primary_pass"] = primary["status"] == "PASS"
+          pathlib.Path("artifacts/transport_manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(manifest, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload raw files and manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s29-openworm-real-data
+          path: artifacts/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
+      - name: Enforce primary real recording
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          manifest = json.load(open("artifacts/transport_manifest.json", "r", encoding="utf-8"))
+          if not manifest["primary_pass"]:
+              raise SystemExit("primary OpenWorm normalized recording was not acquired")
+          PY
