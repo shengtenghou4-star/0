@@ -1,0 +1,155 @@
+name: ZAL Dual Bound Build Audit
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/zal-dual-bound-build-audit.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zal-dual-bound-build-audit
+  cancel-in-progress: false
+
+jobs:
+  validate-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      REQUEST_ID: 7a8fdb2c4e6f4189a0c3d5e7f1b29460
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Recover authority-bound sources and frontier
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/dual /tmp/result
+          python - <<'PY'
+          import base64, hashlib, json, os, pathlib, urllib.parse, urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; request=os.environ['REQUEST_ID']
+          headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'zal-dual-bound-audit'}
+          def content(repo,path,ref):
+              q=urllib.parse.urlencode({'ref':ref})
+              req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}?{q}',headers=headers)
+              with urllib.request.urlopen(req,timeout=180) as r: env=json.load(r)
+              return base64.b64decode(env['content'])
+          def git_blob(repo,sha):
+              req=urllib.request.Request(f'https://api.github.com/repos/{repo}/git/blobs/{sha}',headers=headers)
+              with urllib.request.urlopen(req,timeout=180) as r: env=json.load(r)
+              return base64.b64decode(env['content'])
+          def blob(data): return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          root=pathlib.Path('/tmp/dual')
+          raw=content('shengtenghou4-star/00',f'relay/requests/{request}/input.json','main'); inp=json.loads(raw)
+          dual=git_blob(inp['authority_repository'],inp['dual_bound_script_git_blob'])
+          test=git_blob(inp['authority_repository'],inp['dual_bound_test_git_blob'])
+          base=content('shengtenghou4-star/00','relay/requests/7a8f0d51de9c4b72a630f184c2e5d9b7/profile37_outside_degree_split_cnf.py','main')
+          frontier=content('shengtenghou4-star/00','relay/focused-inspections/7a8f0d51de9c4b72a630f184c2e5d9b7/30703350166-1/open-frontier-v1.json','results')
+          live=content('shengtenghou4-star/00','relay/requests/7a8f9c4e2d1b4f6a8c0e3b5d7f9a1c42/live21-checkpoint.json','main')
+          checks={
+            'dual_blob':blob(dual)==inp['dual_bound_script_git_blob'],
+            'test_blob':blob(test)==inp['dual_bound_test_git_blob'],
+            'base_blob':blob(base)==inp['base_builder_git_blob'],
+            'frontier_blob':blob(frontier)==inp['frontier_git_blob'],
+            'live_blob':blob(live)==inp['live_checkpoint_git_blob'],
+          }
+          if not all(checks.values()): raise SystemExit(f'source binding failure: {checks}')
+          (root/'profile37_outside_degree_dual_bound_case.py').write_bytes(dual)
+          (root/'test_profile37_dual_bounds.py').write_bytes(test)
+          (root/'profile37_outside_degree_split_cnf.py').write_bytes(base)
+          (root/'frontier.json').write_bytes(frontier)
+          (root/'live.json').write_bytes(live)
+          (root/'input.json').write_bytes(raw)
+          receipt={'schema':'profile37-dual-bound-source-recovery/v1','request_id':request,'checks':checks,'input_sha256':hashlib.sha256(raw).hexdigest(),'source_blobs':{'dual':blob(dual),'test':blob(test),'base':blob(base),'frontier':blob(frontier),'live':blob(live)}}
+          (root/'source-recovery-receipt.json').write_text(json.dumps(receipt,indent=2,sort_keys=True)+'\n')
+          PY
+          python -m py_compile /tmp/dual/*.py
+
+      - name: Exhaustively validate the two inequalities on all 4x4 matrices
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/dual
+          python test_profile37_dual_bounds.py | tee /tmp/result/dual-bound-test.log
+          grep -q "'status': 'PASS'" /tmp/result/dual-bound-test.log
+
+      - name: Build all nine strengthened deterministic CNFs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, pathlib, subprocess
+          root=pathlib.Path('/tmp/dual'); out=pathlib.Path('/tmp/result/cases'); out.mkdir(parents=True)
+          inp=json.loads((root/'input.json').read_text()); frontier=json.loads((root/'frontier.json').read_text())
+          rows={entry.get('expected_case_id_from_payload') or entry.get('directory'):entry for entry in frontier['open_cases']}
+          expected=inp['residual_case_ids']
+          if len(expected)!=9 or len(set(expected))!=9: raise SystemExit('invalid residual set')
+          missing=sorted(set(expected)-set(rows));
+          if missing: raise SystemExit(f'missing frontier cases: {missing}')
+          reports=[]
+          for case_id in expected:
+              source=rows[case_id]; work=out/case_id; work.mkdir()
+              second=','.join(map(str,source['second_only'])); neither=','.join(map(str,source['neither']))
+              cmd=['python',str(root/'profile37_outside_degree_dual_bound_case.py'),'--inside','7,8,8,8,8,8,8,8,9','--t','4','--second-only',second,'--neither',neither,'--expected-case-id',case_id,'--expected-base-cnf-sha256',source['cnf_sha256'],'--source-report-sha256',source['report_sha256'],'--frontier-git-blob',inp['frontier_git_blob'],'--workdir',str(work),'--build-only','--discard-cnf']
+              subprocess.run(cmd,check=True,stdout=(work/'stdout.jsonl').open('w'),stderr=subprocess.STDOUT,text=True)
+              report=json.loads((work/'report.json').read_text())
+              checks=[report['binding_pass'] is True,report['status']=='BUILT_ONLY',report['case_id']==case_id,report['base_cnf_sha256']==source['cnf_sha256'],report['source_report_sha256']==source['report_sha256'],report['dual_bounds']['dual_column_pair_bound']==30,report['dual_bounds']['dual_column_star_bound']==240,report['dual_bounds']['dual_column_pair_families']==136,report['dual_bounds']['dual_column_star_families']==17]
+              if not all(checks): raise SystemExit(f'case audit failed: {case_id} {checks}')
+              reports.append(report)
+          summary={
+            'schema':'profile37-dual-bound-build-audit/v1','request_id':inp.get('request_id','7a8fdb2c4e6f4189a0c3d5e7f1b29460'),'mode':inp['mode'],'inside':inp['inside'],'case_count':len(reports),'case_ids':[r['case_id'] for r in reports],
+            'all_base_hashes_reproduced':all(r['base_cnf_sha256']==rows[r['case_id']]['cnf_sha256'] for r in reports),
+            'unique_dual_cnf_hashes':len({r['dual_cnf_sha256'] for r in reports}),
+            'base_variables_min':min(r['base_variables'] for r in reports),'base_variables_max':max(r['base_variables'] for r in reports),
+            'base_clauses_min':min(r['base_clauses'] for r in reports),'base_clauses_max':max(r['base_clauses'] for r in reports),
+            'added_variables_min':min(r['dual_bounds']['added_variables'] for r in reports),'added_variables_max':max(r['dual_bounds']['added_variables'] for r in reports),
+            'added_clauses_min':min(r['dual_bounds']['added_clauses'] for r in reports),'added_clauses_max':max(r['dual_bounds']['added_clauses'] for r in reports),
+            'dual_variables_min':min(r['dual_variables'] for r in reports),'dual_variables_max':max(r['dual_variables'] for r in reports),
+            'dual_clauses_min':min(r['dual_clauses'] for r in reports),'dual_clauses_max':max(r['dual_clauses'] for r in reports),
+            'pair_bound':30,'column_star_bound':240,'pair_families':136,'column_star_families':17,
+            'status':'PASS_BUILD_ONLY_NO_PROOF_CREDIT','global_checkpoint_increment':0,'paper_versions':inp['paper_versions'],
+            'reports':[{'case_id':r['case_id'],'base_cnf_sha256':r['base_cnf_sha256'],'dual_cnf_sha256':r['dual_cnf_sha256'],'base_variables':r['base_variables'],'base_clauses':r['base_clauses'],'dual_variables':r['dual_variables'],'dual_clauses':r['dual_clauses'],'added_variables':r['dual_bounds']['added_variables'],'added_clauses':r['dual_bounds']['added_clauses'],'build_seconds':r['build_seconds']} for r in reports]
+          }
+          raw=(json.dumps(summary,indent=2,sort_keys=True)+'\n').encode(); (pathlib.Path('/tmp/result')/'summary.json').write_bytes(raw); (pathlib.Path('/tmp/result')/'summary.sha256').write_text(hashlib.sha256(raw).hexdigest()+'\n')
+          print(json.dumps(summary,sort_keys=True))
+          PY
+
+      - name: Store one private audit package
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, tarfile, urllib.error, urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; request=os.environ['REQUEST_ID']; run=os.environ['RUN_ID']; attempt=os.environ['RUN_ATTEMPT']; repo='shengtenghou4-star/00'; branch=f'zal-dual-bound-{run}-{attempt}'
+          root=pathlib.Path('/tmp/result'); stream=io.BytesIO()
+          with tarfile.open(fileobj=stream,mode='w:gz',format=tarfile.PAX_FORMAT) as tf:
+              for p in sorted(root.rglob('*')):
+                  if p.is_symlink(): raise SystemExit('unsafe result')
+                  tf.add(p,arcname=p.relative_to(root),recursive=False)
+          package=stream.getvalue(); summary=(root/'summary.json').read_bytes()
+          receipt={'schema':1,'request_id':request,'run_id':run,'run_attempt':attempt,'branch':branch,'package_bytes':len(package),'package_sha256':hashlib.sha256(package).hexdigest(),'summary_sha256':hashlib.sha256(summary).hexdigest(),'status':'PASS_BUILD_ONLY_NO_PROOF_CREDIT'}
+          headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'zal-dual-bound-store'}
+          with urllib.request.urlopen(urllib.request.Request(f'https://api.github.com/repos/{repo}/git/ref/heads/results',headers=headers),timeout=120) as r: base=json.load(r)['object']['sha']
+          body=json.dumps({'ref':f'refs/heads/{branch}','sha':base}).encode()
+          try:
+              with urllib.request.urlopen(urllib.request.Request(f'https://api.github.com/repos/{repo}/git/refs',data=body,method='POST',headers=headers),timeout=120) as r: r.read()
+          except urllib.error.HTTPError as exc:
+              if exc.code!=422: raise
+          def put(path,data,message):
+              body=json.dumps({'message':message,'content':base64.b64encode(data).decode(),'branch':branch},separators=(',',':')).encode()
+              with urllib.request.urlopen(urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}',data=body,method='PUT',headers=headers),timeout=300) as r: r.read()
+          prefix=f'relay/results/{request}/{run}-{attempt}'
+          put(f'{prefix}/summary.json',summary,'Store ZAL dual-bound build summary')
+          put(f'{prefix}/package.tar.gz',package,'Store ZAL dual-bound build package')
+          put(f'{prefix}/receipt.json',(json.dumps(receipt,indent=2,sort_keys=True)+'\n').encode(),'Store ZAL dual-bound build receipt')
+          PY
