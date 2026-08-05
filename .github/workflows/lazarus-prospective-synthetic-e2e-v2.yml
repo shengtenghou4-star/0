@@ -1,0 +1,96 @@
+name: LAZARUS prospective synthetic sealed E2E v2
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/lazarus-prospective-synthetic-e2e-v2.yml"
+      - "lazarus-public-compute/test_prospective_sealed_wrapper_e2e_v2.py"
+      - "lazarus-public-compute/lazarus_prospective_sealed_wrapper_v2.py"
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-e2e:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install frozen runtime
+        run: python -m pip install "numpy==2.3.2" "scipy==1.16.1" "scikit-learn==1.7.1" --quiet --progress-bar off
+      - name: Decode and hash-lock reviewed payloads
+        run: |
+          python - <<'PY'
+          import base64, gzip, hashlib
+          from pathlib import Path
+          payloads = [
+              ('lazarus-public-compute/payload/lazarus_public_compute.py.gz.b64', 'lazarus-public-compute/lazarus_public_compute.py', '7429d615a4fcbcff529270ed25dbfb6e1395b07883dda59d4f9317724bfd6a2c'),
+              ('lazarus-public-compute/payload/lazarus_orth_residual_compute.py.gz.b64', 'lazarus-public-compute/lazarus_orth_residual_compute.py', '42c284c9f06f713a59443fae04987292b6fc39ff1de1f85e903207c6857a8c33'),
+              ('lazarus-public-compute/payload/lazarus_prospective_snapshot_compute.py.gz.b64', 'lazarus-public-compute/lazarus_prospective_snapshot_compute.py', '3e27e43dc33ba8deac14d4b981cd8fe9d7d220cd01e908f31fee51fb4e9a200c'),
+          ]
+          for source_name, target_name, expected in payloads:
+              source = Path(source_name)
+              target = Path(target_name)
+              target.write_bytes(gzip.decompress(base64.b64decode(source.read_text().strip())))
+              actual = hashlib.sha256(target.read_bytes()).hexdigest()
+              assert actual == expected, (target_name, actual, expected)
+          wrapper = Path('lazarus-public-compute/lazarus_prospective_sealed_wrapper_v2.py')
+          assert hashlib.sha256(wrapper.read_bytes()).hexdigest() == '5d354d5482c59be02fe7775849e6841b333d35617262e91c46fae633efd8cdf1'
+          family = Path('lazarus-public-compute/frozen/primary_family_components_v1.csv')
+          assert hashlib.sha256(family.read_bytes()).hexdigest() == '6e7080e2d22e66322ea0884515be9ae5c6762eeb24acc16005ca45d68ecba788'
+          PY
+      - name: Compile rehearsal and wrapper
+        run: |
+          python -m py_compile lazarus-public-compute/lazarus_prospective_sealed_wrapper_v2.py
+          python -m py_compile lazarus-public-compute/test_prospective_sealed_wrapper_e2e_v2.py
+      - name: Restore exact July public snapshot
+        run: python cases/7838a640602a3a78463d52e06e2a614a/fetch_archive.py
+      - name: Execute synthetic full sealed transaction
+        run: |
+          python lazarus-public-compute/test_prospective_sealed_wrapper_e2e_v2.py \
+            --legacy lazarus-public-compute/lazarus_public_compute.py \
+            --runner lazarus-public-compute/lazarus_prospective_snapshot_compute.py \
+            --orth lazarus-public-compute/lazarus_orth_residual_compute.py \
+            --wrapper lazarus-public-compute/lazarus_prospective_sealed_wrapper_v2.py \
+            --training-data cases/7838a640602a3a78463d52e06e2a614a/artifacts/catnap-2026-07-01 \
+            --families lazarus-public-compute/frozen/primary_family_components_v1.csv \
+            --output lazarus-public-compute/synthetic-sealed-e2e-v2-artifacts
+      - name: Enforce synthetic-only protocol receipt
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('lazarus-public-compute/synthetic-sealed-e2e-v2-artifacts/SYNTHETIC_SEALED_E2E_RECEIPT.json')
+          value = json.loads(path.read_text())
+          assert value['status'] == 'SYNTHETIC_SEALED_E2E_PASS'
+          assert value['synthetic_only'] is True
+          assert value['scientific_interpretation_forbidden'] is True
+          assert value['synthetic_target_rows'] >= 100
+          assert value['synthetic_potent_rows'] >= 25
+          assert value['synthetic_resistant_rows'] >= 25
+          assert value['synthetic_antibodies'] >= 8
+          assert value['synthetic_viruses'] >= 10
+          assert value['synthetic_families'] >= 3
+          assert value['training_overlap_pairs'] == 0
+          assert value['actual_archive_hash_reverified'] is True
+          assert value['actual_supervised_fits'] == 2
+          assert value['prospective_scientific_fits'] == 0
+          assert value['real_august_target_rows_read'] == 0
+          assert value['real_august_target_values_read'] == 0
+          assert value['private_bytes_read'] == 0
+          assert value['atomic_publication_verified'] is True
+          assert value['temporary_target_deleted'] is True
+          assert value['staging_directory_deleted'] is True
+          assert value['wrapper_sha256'] == '5d354d5482c59be02fe7775849e6841b333d35617262e91c46fae633efd8cdf1'
+          assert value['wrapped_runner_sha256'] == '3e27e43dc33ba8deac14d4b981cd8fe9d7d220cd01e908f31fee51fb4e9a200c'
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazarus-prospective-synthetic-sealed-e2e-v2
+          path: lazarus-public-compute/synthetic-sealed-e2e-v2-artifacts/SYNTHETIC_SEALED_E2E_RECEIPT.json
+          if-no-files-found: error
+          retention-days: 1
