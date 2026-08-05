@@ -1,0 +1,188 @@
+name: LAZARUS prospective sealed wrapper v2
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/lazarus-prospective-sealed-wrapper-v2.yml"
+      - "lazarus-public-compute/lazarus_prospective_sealed_wrapper_v2.py"
+
+permissions:
+  contents: read
+
+jobs:
+  sealed-wrapper-preflight:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install frozen runtime
+        run: python -m pip install "numpy==2.3.2" "scipy==1.16.1" "scikit-learn==1.7.1" --quiet --progress-bar off
+      - name: Decode and verify frozen reviewed payloads
+        run: |
+          python - <<'PY'
+          import base64, gzip, hashlib
+          from pathlib import Path
+          payloads = [
+              ('lazarus-public-compute/payload/lazarus_public_compute.py.gz.b64', 'lazarus-public-compute/lazarus_public_compute.py', '7429d615a4fcbcff529270ed25dbfb6e1395b07883dda59d4f9317724bfd6a2c'),
+              ('lazarus-public-compute/payload/lazarus_orth_residual_compute.py.gz.b64', 'lazarus-public-compute/lazarus_orth_residual_compute.py', '42c284c9f06f713a59443fae04987292b6fc39ff1de1f85e903207c6857a8c33'),
+              ('lazarus-public-compute/payload/lazarus_prospective_snapshot_compute.py.gz.b64', 'lazarus-public-compute/lazarus_prospective_snapshot_compute.py', '3e27e43dc33ba8deac14d4b981cd8fe9d7d220cd01e908f31fee51fb4e9a200c'),
+          ]
+          for source_name, target_name, expected in payloads:
+              source = Path(source_name)
+              target = Path(target_name)
+              target.write_bytes(gzip.decompress(base64.b64decode(source.read_text().strip())))
+              actual = hashlib.sha256(target.read_bytes()).hexdigest()
+              assert actual == expected, (target_name, actual, expected)
+          family = Path('lazarus-public-compute/frozen/primary_family_components_v1.csv')
+          assert hashlib.sha256(family.read_bytes()).hexdigest() == '6e7080e2d22e66322ea0884515be9ae5c6762eeb24acc16005ca45d68ecba788'
+          PY
+      - name: Compile and self-test sealed wrapper
+        run: |
+          python -m py_compile lazarus-public-compute/lazarus_prospective_sealed_wrapper_v2.py
+          python lazarus-public-compute/lazarus_prospective_sealed_wrapper_v2.py --self-test
+      - name: Run synthetic archive-integrity and target-degree tests
+        run: |
+          python - <<'PY'
+          import csv
+          import hashlib
+          import importlib.util
+          import json
+          import sys
+          import tarfile
+          import tempfile
+          from pathlib import Path
+
+          wrapper_path = Path('lazarus-public-compute/lazarus_prospective_sealed_wrapper_v2.py')
+          spec = importlib.util.spec_from_file_location('sealed_wrapper_v2', wrapper_path)
+          assert spec and spec.loader
+          wrapper = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = wrapper
+          spec.loader.exec_module(wrapper)
+
+          class FakeLegacy:
+              @staticmethod
+              def virus_sequences(path):
+                  return {'V1': 'AAAA', 'V2': 'BBBB'}
+              @staticmethod
+              def read_table(path):
+                  with path.open(newline='') as handle:
+                      reader = csv.DictReader(handle, delimiter='\t')
+                      return reader.fieldnames, list(reader)
+              @staticmethod
+              def find_field(fields, candidates):
+                  return candidates[0] if candidates[0] in fields else None
+              @staticmethod
+              def clean(value):
+                  return str(value).strip()
+              @staticmethod
+              def parse_val(value):
+                  try:
+                      return float(value)
+                  except (TypeError, ValueError):
+                      return None
+
+          with tempfile.TemporaryDirectory() as temp_name:
+              root = Path(temp_name)
+              source = root / 'source'
+              source.mkdir()
+              (source / 'assay_2026-08-01.txt').write_text('Antibody\tVirus\tIC50\nA\tV\t1\n')
+              (source / 'virseqs_aa_O_2026-08-01.fasta').write_text('>foo.V.bar\nAAAA\n')
+              archive = root / 'CATNAP_2026_08_01.tar.gz'
+              with tarfile.open(archive, 'w:gz') as handle:
+                  for item in source.iterdir():
+                      handle.add(item, arcname=f'folder/{item.name}')
+              commitment = {
+                  'status': 'TARGET_ARCHIVE_HASH_COMMITTED',
+                  'release': '2026-08-01',
+                  'archive_sha256': wrapper.sha256(archive),
+                  'archive_bytes': archive.stat().st_size,
+              }
+              manifest = wrapper.extract_committed_archive(archive, commitment, root / 'extracted')
+              assert set(manifest) == set(wrapper.TARGET_REQUIRED_FILES)
+              bad = dict(commitment)
+              bad['archive_sha256'] = '0' * 64
+              try:
+                  wrapper.extract_committed_archive(archive, bad, root / 'bad')
+              except ValueError as exc:
+                  assert 'hash mismatch' in str(exc)
+              else:
+                  raise AssertionError('wrong target archive hash was accepted')
+
+              fasta = root / 'viruses.fasta'
+              fasta.write_text('>foo.V1.bar\nAAAA\n>foo.V2.bar\nBBBB\n')
+              target_assay = root / 'assay_2026-08-01.txt'
+              training_assay = root / 'assay_2026-07-01.txt'
+              rows = ['Antibody\tVirus\tIC50', 'A1\tV1\t1']
+              rows.extend(f'A{i}\tV2\t1' for i in range(10))
+              target_assay.write_text('\n'.join(rows) + '\n')
+              training_assay.write_text('\n'.join(rows) + '\n')
+              target_matrix, *_ = wrapper.prospective_generic_matrix(None, FakeLegacy, target_assay, fasta)
+              training_matrix, *_ = wrapper.prospective_generic_matrix(None, FakeLegacy, training_assay, fasta)
+              assert any(virus == 'V1' for _, virus in target_matrix)
+              assert not any(virus == 'V1' for _, virus in training_matrix)
+
+          wrapper_sha = hashlib.sha256(wrapper_path.read_bytes()).hexdigest()
+          receipt = {
+              'schema_version': '1.0',
+              'status': 'SEALED_WRAPPER_ADVERSARIAL_TESTS_PASS',
+              'wrapper_sha256': wrapper_sha,
+              'wrapped_runner_sha256': wrapper.EXPECTED_RUNNER_SHA256,
+              'orth_helper_sha256': wrapper.EXPECTED_ORTH_SHA256,
+              'actual_archive_hash_recomputed_before_open': True,
+              'wrong_archive_hash_rejected': True,
+              'exact_required_members_only': list(wrapper.TARGET_REQUIRED_FILES),
+              'target_minimum_virus_edges': 1,
+              'training_minimum_virus_edges': 10,
+              'runtime_supervised_fit_counter_enabled': True,
+              'atomic_publication_enabled': True,
+              'target_rows_parsed': 0,
+              'target_values_read': 0,
+              'supervised_fits': 0,
+              'private_bytes_read': 0,
+          }
+          out = Path('lazarus-public-compute/sealed-wrapper-v2-artifacts')
+          out.mkdir()
+          (out / 'SEALED_WRAPPER_TEST_RECEIPT.json').write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(receipt, sort_keys=True))
+          PY
+      - name: Restore exact July training snapshot
+        run: python cases/7838a640602a3a78463d52e06e2a614a/fetch_archive.py
+      - name: Reconfirm July-only zero-target preflight
+        run: |
+          python lazarus-public-compute/lazarus_prospective_snapshot_compute.py \
+            --legacy lazarus-public-compute/lazarus_public_compute.py \
+            --training-data cases/7838a640602a3a78463d52e06e2a614a/artifacts/catnap-2026-07-01 \
+            --families lazarus-public-compute/frozen/primary_family_components_v1.csv \
+            --output lazarus-public-compute/sealed-wrapper-v2-artifacts/preflight \
+            --preflight-training
+      - name: Enforce zero-target invariants
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          audit = json.loads(Path('lazarus-public-compute/sealed-wrapper-v2-artifacts/SEALED_WRAPPER_TEST_RECEIPT.json').read_text())
+          preflight = json.loads(Path('lazarus-public-compute/sealed-wrapper-v2-artifacts/preflight/PROSPECTIVE_PREFLIGHT_RECEIPT.json').read_text())
+          assert audit['status'] == 'SEALED_WRAPPER_ADVERSARIAL_TESTS_PASS'
+          assert audit['wrong_archive_hash_rejected'] is True
+          assert audit['target_minimum_virus_edges'] == 1
+          assert audit['training_minimum_virus_edges'] == 10
+          assert audit['runtime_supervised_fit_counter_enabled'] is True
+          assert audit['atomic_publication_enabled'] is True
+          assert preflight['status'] == 'PROSPECTIVE_PREFLIGHT_PASS'
+          assert preflight['training_pairs'] == 63112
+          for receipt in (audit, preflight):
+              assert receipt['target_rows_parsed'] == 0
+              assert receipt['target_values_read'] == 0
+              assert receipt['supervised_fits'] == 0
+              assert receipt['private_bytes_read'] == 0
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazarus-prospective-sealed-wrapper-v2
+          path: lazarus-public-compute/sealed-wrapper-v2-artifacts
+          if-no-files-found: error
+          retention-days: 1
