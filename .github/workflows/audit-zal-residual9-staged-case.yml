@@ -1,0 +1,191 @@
+name: Audit ZAL Residual9 Staged Case
+
+on:
+  push:
+    paths:
+      - '.github/workflows/audit-zal-residual9-staged-case.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      REQUEST_ID: 7a8f9c4e2d1b4f6a8c0e3b5d7f9a1c42
+      RUN_ID: '31023502730'
+      RUN_ATTEMPT: '1'
+      CASE_ID: b_8_8_8_9__n_8_10_10
+      STAGE_BRANCH: zal-stage-31023502730-1-b_8_8_8_9__n_8_10_10
+      EXPECTED_PACKAGE_SHA256: 132538e076d03041532a630c1c0b02e4e8cb6461a7bd26236fc50007265856ce
+      EXPECTED_LIVE_BLOB: e3fe98ce6f6d97a06f1f1451d02cfa4abc0956b5
+      EXPECTED_RESIDUAL_BLOB: 1ef1a69fbc5c418fa39028a6fb73c01d75782cf7
+      EXPECTED_FRONTIER_BLOB: d8407d78795835cbdfe80737cf7b646561af8b91
+      EXPECTED_PORTFOLIO_BLOB: 8fd9863e6af4e69ea851f808d94c80555bab2956
+      EXPECTED_KISSAT_COMMIT: 8af8e56f174b778aef3aa45af9f739b2a5f492c2
+      EXPECTED_CADICAL_COMMIT: c60730422e758ef1cebe7aeddf2dda31c996bf04
+      EXPECTED_TARGET: 't4:7,8,8,8|8,8,8,8,9'
+      EXPECTED_INSIDE: '[7,8,8,8,8,8,8,8,9]'
+    steps:
+      - name: Fetch, safely unpack, and audit staged package
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/audit/root /tmp/audit/out
+          python - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, re, tarfile, urllib.parse, urllib.request
+
+          repo='shengtenghou4-star/00'
+          token=os.environ['LAB_QUEUE_TOKEN']
+          request=os.environ['REQUEST_ID']; run=os.environ['RUN_ID']; attempt=os.environ['RUN_ATTEMPT']; case_id=os.environ['CASE_ID']; branch=os.environ['STAGE_BRANCH']
+          headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'zal-residual9-staged-audit'}
+          def fetch(path, ref):
+              q=urllib.parse.urlencode({'ref':ref})
+              req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}?{q}',headers=headers)
+              with urllib.request.urlopen(req,timeout=180) as r: env=json.load(r)
+              return base64.b64decode(env['content']), env.get('sha')
+          def git_blob(data): return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          prefix=f'relay/staging/{request}/{run}-{attempt}/{case_id}'
+          receipt_raw, receipt_blob=fetch(f'{prefix}/receipt.json',branch)
+          package, package_blob=fetch(f'{prefix}/result.tar.gz',branch)
+          receipt=json.loads(receipt_raw)
+          failures=[]
+          checks={}
+          def check(name, cond, detail=None):
+              checks[name]=bool(cond)
+              if not cond: failures.append({'check':name,'detail':detail})
+          check('receipt_request',receipt.get('request_id')==request,receipt.get('request_id'))
+          check('receipt_run',str(receipt.get('run_id'))==run,str(receipt.get('run_id')))
+          check('receipt_attempt',str(receipt.get('run_attempt'))==attempt,str(receipt.get('run_attempt')))
+          check('receipt_case',receipt.get('case_id')==case_id,receipt.get('case_id'))
+          check('receipt_branch',receipt.get('staging_branch')==branch,receipt.get('staging_branch'))
+          check('receipt_contract_pass',receipt.get('contract_pass') is True,receipt.get('contract_pass'))
+          check('receipt_solver_status',receipt.get('solver_status')=='UNSAT',receipt.get('solver_status'))
+          check('receipt_solver_exit',receipt.get('solver_exit_code')==20,receipt.get('solver_exit_code'))
+          check('receipt_wrapper_return',receipt.get('wrapper_return_code')==0,receipt.get('wrapper_return_code'))
+          package_sha=hashlib.sha256(package).hexdigest()
+          check('package_sha_receipt',package_sha==receipt.get('result_sha256'),package_sha)
+          check('package_sha_expected',package_sha==os.environ['EXPECTED_PACKAGE_SHA256'],package_sha)
+          check('package_size',len(package)==receipt.get('result_bytes'),len(package))
+
+          root=pathlib.Path('/tmp/audit/root')
+          members=[]
+          with tarfile.open(fileobj=io.BytesIO(package),mode='r:gz') as tf:
+              for m in tf.getmembers():
+                  p=pathlib.PurePosixPath(m.name)
+                  if p.is_absolute() or '..' in p.parts or m.issym() or m.islnk():
+                      failures.append({'check':'safe_archive','detail':m.name}); continue
+                  members.append(m.name)
+              if not failures:
+                  tf.extractall(root)
+          check('safe_archive',not any(x.get('check')=='safe_archive' for x in failures),members)
+
+          files={}
+          for p in sorted(root.rglob('*')):
+              if p.is_file():
+                  rel=str(p.relative_to(root)); data=p.read_bytes()
+                  files[rel]={'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),'git_blob':git_blob(data)}
+          required=['input.json','live21-checkpoint.json','source-recovery-receipt.json','return-code.txt','exact/case-audit.json','exact/report.json','exact/solver.log','kissat-source-commit.txt','cadical-source-commit.txt','portfolio.sha256','kissat.sha256','cadical.sha256']
+          for rel in required: check('file:'+rel,rel in files,sorted(files))
+
+          def load_json(rel): return json.loads((root/rel).read_text())
+          inp=load_json('input.json') if (root/'input.json').exists() else {}
+          live=load_json('live21-checkpoint.json') if (root/'live21-checkpoint.json').exists() else {}
+          recovery=load_json('source-recovery-receipt.json') if (root/'source-recovery-receipt.json').exists() else {}
+          audit=load_json('exact/case-audit.json') if (root/'exact/case-audit.json').exists() else {}
+          report=load_json('exact/report.json') if (root/'exact/report.json').exists() else {}
+          solver_log=(root/'exact/solver.log').read_text(errors='replace') if (root/'exact/solver.log').exists() else ''
+
+          expected_cases=['b_8_8_8_10__n_8_9_10','b_8_8_8_9__n_8_10_10','b_8_8_8_9__n_9_9_10','b_8_8_9_10__n_8_8_10','b_8_8_9_10__n_8_9_9','b_8_8_9_9__n_8_9_10','b_8_8_9_9__n_9_9_9','b_8_9_9_9__n_8_8_10','b_8_9_9_9__n_8_9_9']
+          check('input_case_set',inp.get('residual_case_ids')==expected_cases,inp.get('residual_case_ids'))
+          check('input_target',inp.get('mode')==os.environ['EXPECTED_TARGET'],inp.get('mode'))
+          check('input_inside',inp.get('inside')==json.loads(os.environ['EXPECTED_INSIDE']),inp.get('inside'))
+          check('live_case_count',live.get('accepted_explicit_unsat_cases')==21,live.get('accepted_explicit_unsat_cases'))
+          check('live_residual_set',live.get('residual_open_cases')==expected_cases,live.get('residual_open_cases'))
+          check('live_blob',files.get('live21-checkpoint.json',{}).get('git_blob')==os.environ['EXPECTED_LIVE_BLOB'],files.get('live21-checkpoint.json'))
+          check('recovery_case',recovery.get('case_id')==case_id,recovery.get('case_id'))
+          check('recovery_live',recovery.get('live_checkpoint_git_blob')==os.environ['EXPECTED_LIVE_BLOB'],recovery.get('live_checkpoint_git_blob'))
+          check('recovery_residual',recovery.get('residual12_checkpoint_git_blob')==os.environ['EXPECTED_RESIDUAL_BLOB'],recovery.get('residual12_checkpoint_git_blob'))
+          check('recovery_frontier',recovery.get('frontier_git_blob')==os.environ['EXPECTED_FRONTIER_BLOB'],recovery.get('frontier_git_blob'))
+          check('recovery_portfolio',recovery.get('source_git_blobs',{}).get('profile37_dual_solver_portfolio.py')==os.environ['EXPECTED_PORTFOLIO_BLOB'],recovery.get('source_git_blobs'))
+          check('kissat_commit',(root/'kissat-source-commit.txt').read_text().strip()==os.environ['EXPECTED_KISSAT_COMMIT'] if (root/'kissat-source-commit.txt').exists() else False,None)
+          check('cadical_commit',(root/'cadical-source-commit.txt').read_text().strip()==os.environ['EXPECTED_CADICAL_COMMIT'] if (root/'cadical-source-commit.txt').exists() else False,None)
+          check('portfolio_sha_line',os.environ['EXPECTED_PORTFOLIO_BLOB'] not in (root/'portfolio.sha256').read_text() if (root/'portfolio.sha256').exists() else False,'portfolio.sha256 is SHA-256 not git blob; provenance retained separately')
+
+          # Flexible schema checks, while requiring exact terminal evidence.
+          audit_result=audit.get('result',{}) if isinstance(audit,dict) else {}
+          audit_case=audit.get('case_id') or audit_result.get('case_id') or report.get('case_id')
+          audit_status=audit_result.get('status') or audit.get('status') or report.get('status')
+          audit_exit=audit_result.get('exit_code') if 'exit_code' in audit_result else audit.get('exit_code',report.get('exit_code'))
+          check('audit_contract',audit.get('contract_pass') is True,audit.get('contract_pass'))
+          check('audit_case',audit_case==case_id,audit_case)
+          check('audit_status',audit_status=='UNSAT',audit_status)
+          check('audit_exit',audit_exit==20,audit_exit)
+          check('report_case',report.get('case_id')==case_id,report.get('case_id'))
+          check('report_target',report.get('mode')==os.environ['EXPECTED_TARGET'],report.get('mode'))
+          check('report_inside',report.get('inside')==json.loads(os.environ['EXPECTED_INSIDE']),report.get('inside'))
+          check('report_binding',report.get('binding_pass') is True,report.get('binding_pass'))
+          check('report_status',report.get('status')=='UNSAT',report.get('status'))
+          check('report_exit',report.get('exit_code')==20,report.get('exit_code'))
+          check('report_cnf_hash',report.get('cnf_sha256')==report.get('expected_cnf_sha256'),{'cnf':report.get('cnf_sha256'),'expected':report.get('expected_cnf_sha256')})
+          check('solver_unsat_marker','UNSATISFIABLE' in solver_log,None)
+          check('solver_selected_marker','portfolio-selected' in solver_log,None)
+          selected=None
+          m=re.search(r'portfolio-selected\s+(\w+)',solver_log)
+          if m: selected=m.group(1)
+          check('selected_solver_known',selected in {'kissat','cadical'},selected)
+          check('driver_return_code',(root/'return-code.txt').read_text().strip()=='0' if (root/'return-code.txt').exists() else False,None)
+
+          # Verify report SHA if provided.
+          if (root/'exact/report.sha256').exists() and (root/'exact/report.json').exists():
+              expected=(root/'exact/report.sha256').read_text().strip().split()[0]
+              actual=hashlib.sha256((root/'exact/report.json').read_bytes()).hexdigest()
+              check('report_sha_file',actual==expected,{'actual':actual,'expected':expected})
+
+          verdict='ACCEPT_EXPLICIT_UNSAT_CASE' if not failures else 'REJECT_OR_HOLD'
+          summary={
+            'schema':'profile37-residual9-staged-case-adversarial-audit/v1',
+            'request_id':request,'run_id':run,'run_attempt':attempt,'case_id':case_id,
+            'source_branch':branch,'receipt_blob':receipt_blob,'package_blob':package_blob,
+            'package_sha256':package_sha,'package_bytes':len(package),'selected_solver':selected,
+            'report':report,'case_audit':audit,'source_recovery':recovery,
+            'checks':checks,'failures':failures,'file_manifest':files,'verdict':verdict,
+            'global_checkpoint_increment':0,'accepted_case_increment':1 if verdict.startswith('ACCEPT') else 0,
+            'paper_versions':{'paper_1':'v1.0-P3-frozen','paper_2':'v1.6-P1-active'}
+          }
+          out=(json.dumps(summary,indent=2,sort_keys=True)+'\n').encode()
+          pathlib.Path('/tmp/audit/out/audit.json').write_bytes(out)
+          pathlib.Path('/tmp/audit/out/audit.sha256').write_text(hashlib.sha256(out).hexdigest()+'\n')
+          if failures: raise SystemExit(json.dumps(failures,sort_keys=True))
+          PY
+
+      - name: Store private audit result
+        if: always()
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64,json,os,pathlib,urllib.error,urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; repo='shengtenghou4-star/00'; run='31023502730'; attempt='1'; case_id=os.environ['CASE_ID']
+          branch=f'zal-stage-audit-{run}-{attempt}-{case_id}'
+          headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'zal-residual9-staged-audit-store'}
+          with urllib.request.urlopen(urllib.request.Request(f'https://api.github.com/repos/{repo}/git/ref/heads/results',headers=headers),timeout=120) as r: base=json.load(r)['object']['sha']
+          body=json.dumps({'ref':f'refs/heads/{branch}','sha':base}).encode()
+          try:
+              with urllib.request.urlopen(urllib.request.Request(f'https://api.github.com/repos/{repo}/git/refs',data=body,method='POST',headers=headers),timeout=120) as r: r.read()
+          except urllib.error.HTTPError as exc:
+              if exc.code!=422: raise
+          def put(path,data,msg):
+              payload=json.dumps({'message':msg,'content':base64.b64encode(data).decode(),'branch':branch}).encode()
+              with urllib.request.urlopen(urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}',data=payload,method='PUT',headers=headers),timeout=180) as r: r.read()
+          root=pathlib.Path('/tmp/audit/out')
+          prefix=f'relay/focused-inspections/{os.environ["REQUEST_ID"]}/{run}-{attempt}/{case_id}'
+          for name in ('audit.json','audit.sha256'):
+              p=root/name
+              if p.exists(): put(f'{prefix}/{name}',p.read_bytes(),f'Store staged case audit {case_id}')
+          PY
