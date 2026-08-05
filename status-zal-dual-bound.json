@@ -1,0 +1,16 @@
+{
+  "runs": [
+    {
+      "conclusion": "failure",
+      "created_at": "2026-08-05T16:38:34Z",
+      "head_sha": "45a7d2f9ed332dd0384737185616bdce65f9228a",
+      "html_url": "https://github.com/shengtenghou4-star/0/actions/runs/31026240938",
+      "id": 31026240938,
+      "run_number": 1,
+      "status": "completed",
+      "updated_at": "2026-08-05T16:38:47Z"
+    }
+  ],
+  "schema": 1,
+  "workflow": "zal-dual-bound-build-audit.yml"
+}
