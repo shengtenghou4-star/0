@@ -1,0 +1,109 @@
+name: BIO-001 S34 source structure audit
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install source reader
+        run: python -m pip install "numpy==2.3.5" "scipy==1.17.0"
+
+      - name: Acquire and extract frozen archives
+        run: |
+          python tools/bio001_s34_acquire.py
+          mkdir -p s34_structure_data/training s34_structure_data/development
+          tar -xzf s34_artifacts/raw/AML310_moving.tar.gz -C s34_structure_data/training
+          tar -xzf s34_artifacts/raw/AML310_transition.tar.gz -C s34_structure_data/development
+
+      - name: Inspect first training and development behavior cells
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import numpy as np
+          from scipy import io
+
+          def first_active_line(path):
+              for raw in path.read_text(encoding='utf-8').splitlines():
+                  line = raw.split('#', 1)[0].strip()
+                  if line:
+                      return line.split()[0]
+              raise RuntimeError(f'no active lines in {path}')
+
+          def describe(role):
+              root = Path('s34_structure_data') / role
+              lists = sorted(root.rglob('*_datasets.txt'))
+              if len(lists) != 1:
+                  raise RuntimeError(f'{role}: dataset lists={lists}')
+              rid = first_active_line(lists[0])
+              folders = sorted(p for p in root.rglob(f'{rid}_MS') if p.is_dir())
+              if len(folders) != 1:
+                  raise RuntimeError(f'{role}: folders={folders}')
+              heat_path = folders[0] / 'heatDataMS.mat'
+              if not heat_path.exists():
+                  heat_path = folders[0] / 'heatData.mat'
+              data = io.loadmat(heat_path)
+              behavior = data['behavior']
+              cell = behavior[0][0]
+              record = {
+                  'role': role,
+                  'recording_id': rid,
+                  'behavior_type': type(behavior).__name__,
+                  'behavior_shape': list(behavior.shape),
+                  'behavior_dtype': str(behavior.dtype),
+                  'cell_type': type(cell).__name__,
+                  'cell_shape': list(getattr(cell, 'shape', ())),
+                  'cell_dtype': str(getattr(cell, 'dtype', None)),
+                  'cell_dtype_names': list(getattr(getattr(cell, 'dtype', None), 'names', ()) or ()),
+                  'transpose_type': type(cell.T).__name__,
+                  'transpose_shape': list(getattr(cell.T, 'shape', ())),
+                  'transpose_dtype': str(getattr(cell.T, 'dtype', None)),
+                  'elements': [],
+              }
+              array = cell.T
+              for index in np.ndindex(array.shape):
+                  element = array[index]
+                  record['elements'].append({
+                      'index': list(index),
+                      'type': type(element).__name__,
+                      'shape': list(getattr(element, 'shape', ())),
+                      'dtype': str(getattr(element, 'dtype', None)),
+                  })
+              return record
+
+          payload = {
+              'schema': 'bio-001-s34-real-matlab-behavior-structure-audit-v1',
+              'training': describe('training'),
+              'development': describe('development'),
+              'numeric_values_read': False,
+              'sealed_holdout_requested': False,
+              'sealed_holdout_opened': False,
+          }
+          Path('s34_structure_audit.json').write_text(json.dumps(payload, indent=2, sort_keys=True))
+          print('BIO001_S34_STRUCTURE=' + json.dumps(payload, sort_keys=True))
+          PY
+
+      - name: Upload structure audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s34-source-structure-audit
+          path: s34_structure_audit.json
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: error
