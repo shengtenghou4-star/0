@@ -1,4 +1,4 @@
-name: BIO-001 S34 OSF train-dev acquisition
+name: BIO-001 S34 OSF neural development
 
 on:
   pull_request:
@@ -9,42 +9,156 @@ permissions:
   contents: read
 
 jobs:
-  acquire:
+  train-dev:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Verify frozen code blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object tools/s34_runtime/official_loader_port.py)" = "5d52037432c93ed8b5531faf4edb15533e7c5504"
+          test "$(git hash-object tools/s34_runtime/train_dev_pipeline.py)" = "a8f5c47f63bc4a2dedd06dd4269327205c816ae9"
+          python -m py_compile tools/s34_runtime/official_loader_port.py tools/s34_runtime/train_dev_pipeline.py
+
+      - name: Install frozen runtime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "numpy==2.3.5" "scipy==1.17.0" "scikit-learn==1.8.0"
+
       - name: Acquire and verify frozen training-development archives
         run: python tools/bio001_s34_acquire.py
 
-      - name: Upload training archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: bio001-s34-training
-          path: s34_artifacts/raw/AML310_moving.tar.gz
-          compression-level: 0
-          retention-days: 7
-          if-no-files-found: error
+      - name: Extract verified archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p s34_runtime_data/training s34_runtime_data/development
+          tar -xzf s34_artifacts/raw/AML310_moving.tar.gz -C s34_runtime_data/training
+          tar -xzf s34_artifacts/raw/AML310_transition.tar.gz -C s34_runtime_data/development
 
-      - name: Upload development archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: bio001-s34-development
-          path: s34_artifacts/raw/AML310_transition.tar.gz
-          compression-level: 0
-          retention-days: 7
-          if-no-files-found: error
+      - name: Run frozen M0 M1 M2 training-development protocol
+        env:
+          PYTHONPATH: tools/s34_runtime
+        run: |
+          python tools/s34_runtime/train_dev_pipeline.py \
+            --training-root s34_runtime_data/training \
+            --development-root s34_runtime_data/development \
+            --output s34_runtime_output
 
-      - name: Upload source receipts
+      - name: Independent arithmetic and provenance audit
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          root = Path('.')
+          out = root / 's34_runtime_output'
+          source = json.loads((root / 's34_artifacts/source_manifest.json').read_text())
+          nonaccess = json.loads((root / 's34_artifacts/holdout_nonaccess_receipt.json').read_text())
+          results = json.loads((out / 'development_results.json').read_text())
+          receipt = json.loads((out / 'run_receipt.json').read_text())
+
+          expected = {
+              'AML310_moving.tar.gz': (348_444_164, '144126ee9a49d311c3393deea434e1a0963d55de35318e25d98d48f9c175250a'),
+              'AML310_transition.tar.gz': (486_820_852, 'c524561ae35c09e65b9c0cd4b8ac84df01bf40cbf067c036a3e2a4a5b59fe63e'),
+          }
+          observed = {item['filename']: (item['bytes'], item['sha256']) for item in source['targets']}
+          assert observed == expected, (observed, expected)
+          assert source['observed_total_bytes'] == 835_265_016
+          assert nonaccess['intersection'] == []
+          assert nonaccess['sealed_holdout_requested'] is False
+          assert nonaccess['sealed_holdout_downloaded'] is False
+          assert nonaccess['sealed_holdout_listed_or_opened'] is False
+
+          gate = results['development_gate']
+          horizons = gate['horizons']
+          primary = horizons['10']
+          recalculated = {
+              'all_predictions_finite': bool(gate['checks']['all_predictions_finite']),
+              'primary_M2_to_persistence_ratio_at_most_0_95': primary['recording_balanced_mean_M2_to_persistence_RMSE_ratio'] <= 0.95,
+              'primary_M2_to_M1_ratio_at_most_0_98': primary['recording_balanced_mean_M2_to_M1_RMSE_ratio'] <= 0.98,
+              'at_least_two_horizons_M2_beats_both': gate['horizons_where_M2_beats_both'] >= 2,
+              'at_least_60pct_recordings_M2_beats_M1_primary': gate['primary_fraction_recordings_M2_beats_M1'] >= 0.60,
+          }
+          assert recalculated == gate['checks'], (recalculated, gate['checks'])
+          assert bool(all(recalculated.values())) == gate['pass']
+          expected_status = 'DEVELOPMENT_PASS' if gate['pass'] else 'DEVELOPMENT_FAIL'
+          assert receipt['status'] == expected_status
+          assert receipt['holdout_requested'] is False
+          assert receipt['holdout_opened'] is False
+
+          code_text = '\n'.join([
+              (root / 'tools/s34_runtime/official_loader_port.py').read_text(),
+              (root / 'tools/s34_runtime/train_dev_pipeline.py').read_text(),
+              (root / 'tools/bio001_s34_acquire.py').read_text(),
+          ])
+          assert 'osf.io/download/evhrg/' in code_text
+          assert 'osf.io/download/4u8h2/' in code_text
+          assert 'AML32_chip.tar.gz' not in code_text
+          assert 'AML32_chip' in code_text
+
+          def sha(path: Path) -> str:
+              h = hashlib.sha256()
+              with path.open('rb') as f:
+                  for block in iter(lambda: f.read(1024 * 1024), b''):
+                      h.update(block)
+              return h.hexdigest()
+
+          audit = {
+              'schema': 'bio-001-s34-independent-arithmetic-provenance-audit-v1',
+              'status': 'PASS',
+              'source_bytes_and_sha256': 'PASS',
+              'frozen_loader_git_blob': '5d52037432c93ed8b5531faf4edb15533e7c5504',
+              'frozen_pipeline_git_blob': 'a8f5c47f63bc4a2dedd06dd4269327205c816ae9',
+              'holdout_nonaccess': 'PASS',
+              'gate_recalculation': 'PASS',
+              'development_pass': gate['pass'],
+              'primary_M2_to_persistence_ratio': primary['recording_balanced_mean_M2_to_persistence_RMSE_ratio'],
+              'primary_M2_to_M1_ratio': primary['recording_balanced_mean_M2_to_M1_RMSE_ratio'],
+              'primary_fraction_recordings_M2_beats_M1': gate['primary_fraction_recordings_M2_beats_M1'],
+              'horizons_where_M2_beats_both': gate['horizons_where_M2_beats_both'],
+              'development_results_sha256': sha(out / 'development_results.json'),
+              'frozen_model_sha256': sha(out / 'frozen_model_pre_holdout.json'),
+              'CeRSI_v2_delta': 0.0,
+          }
+          (out / 'independent_audit.json').write_text(json.dumps(audit, indent=2, sort_keys=True, allow_nan=False))
+          compact = {
+              'status': receipt['status'],
+              'M1_alpha': results['M1_selected_alpha'],
+              'M2_alpha': results['M2_selected_alpha'],
+              'checks': gate['checks'],
+              'primary_M2_to_persistence': primary['recording_balanced_mean_M2_to_persistence_RMSE_ratio'],
+              'primary_M2_to_M1': primary['recording_balanced_mean_M2_to_M1_RMSE_ratio'],
+              'primary_fraction_M2_beats_M1': gate['primary_fraction_recordings_M2_beats_M1'],
+              'horizons_M2_beats_both': gate['horizons_where_M2_beats_both'],
+              'holdout_requested': False,
+              'holdout_opened': False,
+          }
+          print('BIO001_S34_RESULT=' + json.dumps(compact, sort_keys=True, allow_nan=False))
+          PY
+
+      - name: Upload neural-development evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bio001-s34-source-receipts
+          name: bio001-s34-neural-development
           path: |
+            s34_runtime_output/
             s34_artifacts/source_manifest.json
             s34_artifacts/archive_inventory.json
             s34_artifacts/holdout_nonaccess_receipt.json
           compression-level: 9
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: warn
