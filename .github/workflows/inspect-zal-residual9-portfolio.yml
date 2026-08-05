@@ -1,0 +1,40 @@
+name: Inspect ZAL Residual9 Portfolio
+
+on:
+  push:
+    paths:
+      - '.github/workflows/inspect-zal-residual9-portfolio.yml'
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Query workflow status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64,json,os,urllib.error,urllib.request
+          token=os.environ['GH_TOKEN']; repo='shengtenghou4-star/0'
+          headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'inspect-zal-residual9'}
+          req=urllib.request.Request(f'https://api.github.com/repos/{repo}/actions/workflows/matrix-zal-residual9-portfolio.yml/runs?per_page=5',headers=headers)
+          with urllib.request.urlopen(req,timeout=120) as r: data=json.load(r)
+          out={'schema':1,'workflow':'matrix-zal-residual9-portfolio.yml','runs':[{'id':x['id'],'status':x['status'],'conclusion':x['conclusion'],'run_number':x['run_number'],'head_sha':x['head_sha'],'created_at':x['created_at'],'updated_at':x['updated_at'],'html_url':x['html_url']} for x in data.get('workflow_runs',[])]}
+          raw=(json.dumps(out,indent=2,sort_keys=True)+'\n').encode(); path='status-zal-residual9-portfolio.json'
+          sha=None
+          try:
+              q=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}',headers=headers)
+              with urllib.request.urlopen(q,timeout=120) as r: sha=json.load(r)['sha']
+          except urllib.error.HTTPError as exc:
+              if exc.code!=404: raise
+          body={'message':'Update ZAL residual9 portfolio status','content':base64.b64encode(raw).decode(),'branch':'main'}
+          if sha: body['sha']=sha
+          put=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}',data=json.dumps(body).encode(),method='PUT',headers=headers)
+          with urllib.request.urlopen(put,timeout=120) as r: r.read()
+          PY
