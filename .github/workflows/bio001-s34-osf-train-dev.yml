@@ -1,0 +1,50 @@
+name: BIO-001 S34 OSF train-dev acquisition
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Acquire and verify frozen training-development archives
+        run: python tools/bio001_s34_acquire.py
+
+      - name: Upload training archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s34-training
+          path: s34_artifacts/raw/AML310_moving.tar.gz
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload development archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s34-development
+          path: s34_artifacts/raw/AML310_transition.tar.gz
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload source receipts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s34-source-receipts
+          path: |
+            s34_artifacts/source_manifest.json
+            s34_artifacts/archive_inventory.json
+            s34_artifacts/holdout_nonaccess_receipt.json
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: error
