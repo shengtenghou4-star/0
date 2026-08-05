@@ -15,7 +15,14 @@ NOMINATED_ARCHIVE = (
     "/scratch/NEUTRALIZATION/archive/CATNAP_2026_08_01.tar.gz"
 )
 EXPECTED_RELEASE_TOKEN = "CATNAP_2026_08_01.tar.gz"
-UA = "Mozilla/5.0 LAZARUS-prospective-hash-only/2026-08-01"
+REQUIRED_CURRENT_FILE_TOKENS = (
+    "assay_2026-08-01.txt",
+    "abs_2026-08-01.txt",
+    "heavy_seqs_aa_2026-08-01.fasta",
+    "light_seqs_aa_2026-08-01.fasta",
+    "virseqs_aa_O_2026-08-01.fasta",
+)
+UA = "Mozilla/5.0 LAZARUS-prospective-hash-only/2026-08-01-recheck-v2"
 
 
 def run(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -45,7 +52,7 @@ def write_receipt(root: Path, receipt: dict[str, object]) -> None:
 
 def base_receipt() -> dict[str, object]:
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "project": "LAZARUS Genesis",
         "release": "2026-08-01",
         "source": "LANL HIV CATNAP official monthly archive",
@@ -79,20 +86,38 @@ def main() -> None:
         raise RuntimeError(f"download page failed with curl code {page_result.returncode}")
 
     page_text = page.read_text(encoding="utf-8", errors="replace")
-    page_mentions_release = EXPECTED_RELEASE_TOKEN in page_text
-    hrefs = [
+    all_hrefs = [
         html.unescape(match)
         for match in re.findall(r'href=["\']([^"\']+)["\']', page_text, flags=re.IGNORECASE)
-        if EXPECTED_RELEASE_TOKEN in html.unescape(match)
     ]
-    receipt = base_receipt()
-    receipt["page_mentions_release"] = page_mentions_release
-    receipt["matching_official_links"] = len(hrefs)
+    archive_hrefs = [href for href in all_hrefs if EXPECTED_RELEASE_TOKEN in href]
+    required_file_presence = {
+        token: any(token in href for href in all_hrefs)
+        for token in REQUIRED_CURRENT_FILE_TOKENS
+    }
+    all_august_file_hrefs = sorted({href for href in all_hrefs if "_2026-08-01." in href})
 
-    if not page_mentions_release or not hrefs:
+    receipt = base_receipt()
+    receipt.update({
+        "official_page_sha256": hashlib.sha256(page.read_bytes()).hexdigest(),
+        "page_mentions_archive_release": EXPECTED_RELEASE_TOKEN in page_text,
+        "matching_official_archive_links": len(archive_hrefs),
+        "required_current_file_links_present": required_file_presence,
+        "required_current_file_link_count": sum(required_file_presence.values()),
+        "all_august_current_file_link_count": len(all_august_file_hrefs),
+        "current_files_opened": 0,
+        "current_file_bytes_read": 0,
+    })
+
+    if EXPECTED_RELEASE_TOKEN not in page_text or not archive_hrefs:
         receipt.update({
-            "status": "ABORT_TARGET_UNAVAILABLE",
-            "reason": "official LANL download page does not publish the nominated 2026-08-01 archive",
+            "status": "ABORT_TARGET_ARCHIVE_UNAVAILABLE_CURRENT_FILES_PUBLISHED",
+            "reason": (
+                "official LANL page publishes current 2026-08-01 file links but does not publish "
+                "the separately frozen CATNAP_2026_08_01 archive"
+                if sum(required_file_presence.values()) == len(REQUIRED_CURRENT_FILE_TOKENS)
+                else "official LANL page does not publish the nominated 2026-08-01 archive"
+            ),
             "archive_bytes": None,
             "archive_sha256": None,
             "effective_url": None,
@@ -100,7 +125,7 @@ def main() -> None:
         })
         write_receipt(root, receipt)
     else:
-        official_url = urljoin(PAGE, hrefs[0])
+        official_url = urljoin(PAGE, archive_hrefs[0])
         if EXPECTED_RELEASE_TOKEN not in official_url:
             raise AssertionError("official page link release token drifted")
         archive_result = run([
