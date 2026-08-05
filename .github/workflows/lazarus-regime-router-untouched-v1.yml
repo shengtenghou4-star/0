@@ -53,7 +53,7 @@ jobs:
 
           fixed = {
               'lazarus-public-compute/lazarus_prospective_sealed_wrapper_v2.py': '5d354d5482c59be02fe7775849e6841b333d35617262e91c46fae633efd8cdf1',
-              'lazarus-public-compute/lazarus_historical_monthly_delta_v1.py': 'f488903da02dc66191875f64bce17eeba74114e3',
+              'lazarus-public-compute/lazarus_historical_monthly_delta_v1.py': 'eea8bca3aa52832c2f2e6ab1ad62ea973c238bc757cbd8a7391f6a1a7044fdc3',
               'lazarus-public-compute/frozen/primary_family_components_v1.csv': '6e7080e2d22e66322ea0884515be9ae5c6762eeb24acc16005ca45d68ecba788',
           }
           for name, expected in fixed.items():
