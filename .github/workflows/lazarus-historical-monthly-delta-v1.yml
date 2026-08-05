@@ -5,6 +5,7 @@ on:
     paths:
       - ".github/workflows/lazarus-historical-monthly-delta-v1.yml"
       - "lazarus-public-compute/lazarus_historical_monthly_delta_v1.py"
+      - "lazarus-public-compute/lazarus_historical_monthly_delta_launcher_v2.py"
 
 permissions:
   contents: read
@@ -43,10 +44,12 @@ jobs:
           assert hashlib.sha256(family.read_bytes()).hexdigest() == '6e7080e2d22e66322ea0884515be9ae5c6762eeb24acc16005ca45d68ecba788'
           PY
       - name: Compile historical audit
-        run: python -m py_compile lazarus-public-compute/lazarus_historical_monthly_delta_v1.py
+        run: |
+          python -m py_compile lazarus-public-compute/lazarus_historical_monthly_delta_v1.py
+          python -m py_compile lazarus-public-compute/lazarus_historical_monthly_delta_launcher_v2.py
       - name: Execute three frozen historical windows
         run: |
-          python lazarus-public-compute/lazarus_historical_monthly_delta_v1.py \
+          python lazarus-public-compute/lazarus_historical_monthly_delta_launcher_v2.py \
             --runner lazarus-public-compute/lazarus_prospective_snapshot_compute.py \
             --legacy lazarus-public-compute/lazarus_public_compute.py \
             --orth lazarus-public-compute/lazarus_orth_residual_compute.py \
@@ -65,6 +68,7 @@ jobs:
           assert 0 <= summary['windows_fitted'] <= 3
           assert 0 <= summary['historical_supervised_fits'] <= 6
           assert summary['historical_supervised_fits'] == receipt['historical_supervised_fits']
+          assert summary['fixed_sequence_support']['antibody_metadata_and_heavy_light_release'] == '2026-07-01'
           for value in (summary, receipt):
               assert value['real_august_rows_read'] == 0
               assert value['real_august_values_read'] == 0
