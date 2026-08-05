@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/lazarus-regime-router-untouched-v1.yml"
+      - "lazarus-public-compute/patch_regime_router_transport_v1.py"
       - "lazarus-public-compute/payload/lazarus_regime_router_untouched_v1.py.gz.b64.part01"
       - "lazarus-public-compute/payload/lazarus_regime_router_untouched_v1.py.gz.b64.part02"
 
@@ -27,124 +28,44 @@ jobs:
           python - <<'PY'
           import base64, gzip, hashlib
           from pathlib import Path
-
           payloads = [
               ('lazarus-public-compute/payload/lazarus_public_compute.py.gz.b64', 'lazarus-public-compute/lazarus_public_compute.py', '7429d615a4fcbcff529270ed25dbfb6e1395b07883dda59d4f9317724bfd6a2c'),
               ('lazarus-public-compute/payload/lazarus_orth_residual_compute.py.gz.b64', 'lazarus-public-compute/lazarus_orth_residual_compute.py', '42c284c9f06f713a59443fae04987292b6fc39ff1de1f85e903207c6857a8c33'),
               ('lazarus-public-compute/payload/lazarus_prospective_snapshot_compute.py.gz.b64', 'lazarus-public-compute/lazarus_prospective_snapshot_compute.py', '3e27e43dc33ba8deac14d4b981cd8fe9d7d220cd01e908f31fee51fb4e9a200c'),
           ]
           for source_name, target_name, expected in payloads:
-              source = Path(source_name)
               target = Path(target_name)
-              target.write_bytes(gzip.decompress(base64.b64decode(source.read_text().strip())))
+              target.write_bytes(gzip.decompress(base64.b64decode(Path(source_name).read_text().strip())))
               actual = hashlib.sha256(target.read_bytes()).hexdigest()
               assert actual == expected, (target_name, actual, expected)
-
-          parts = [
-              Path('lazarus-public-compute/payload/lazarus_regime_router_untouched_v1.py.gz.b64.part01'),
-              Path('lazarus-public-compute/payload/lazarus_regime_router_untouched_v1.py.gz.b64.part02'),
-          ]
-          encoded = ''.join(path.read_text().strip() for path in parts)
+          encoded = ''.join(
+              Path(name).read_text().strip()
+              for name in (
+                  'lazarus-public-compute/payload/lazarus_regime_router_untouched_v1.py.gz.b64.part01',
+                  'lazarus-public-compute/payload/lazarus_regime_router_untouched_v1.py.gz.b64.part02',
+              )
+          )
           router = Path('lazarus-public-compute/lazarus_regime_router_untouched_v1.py')
           router.write_bytes(gzip.decompress(base64.b64decode(encoded)))
-          original_router_sha = hashlib.sha256(router.read_bytes()).hexdigest()
-          assert original_router_sha == '5d8ced1d50e0193ce4d4a16037d2d043e36f09b8ff3731ab9ba9e62d49cbe606'
-
-          old_hash = 'f488903da02dc66191875f64bce17eeba74114e3'
-          new_hash = 'eea8bca3aa52832c2f2e6ab1ad62ea973c238bc757cbd8a7391f6a1a7044fdc3'
-          text = router.read_text()
-          assert text.count(old_hash) == 1
-          text = text.replace(old_hash, new_hash)
-          assert hashlib.sha256(text.encode()).hexdigest() == 'e5fb3ab06575dbf3b8deffb08efb321afdf093a18ed7c71b91538a950301ec7a'
-
-          old_transport = '''    input_receipts = {
-              release: historical.fetch_release(release, releases)
-              for release in ("2026-01-01", "2026-02-01", "2026-03-01", "2026-04-01", "2026-07-01")
-          }
-
-          summaries: list[dict[str, Any]] = []
-          total_fits = 0
-          fitted_paths: list[Path] = []
-          for training_release, target_release in WINDOWS:
-              output = windows_root / f"{training_release}_to_{target_release}"
-              result = execute_window(
-                  runner, legacy, orth, wrapper, historical, args.families, releases,
-                  training_release, target_release, output,
-              )
-              summaries.append(result)
-              total_fits += int(result["supervised_fits"])
-              if result["status"] == "ROUTER_WINDOW_COMPLETE":
-                  fitted_paths.append(output)
-          '''
-          new_transport = '''    input_receipts: dict[str, Any] = {}
-          unavailable_releases: dict[str, str] = {}
-          for release in ("2026-01-01", "2026-02-01", "2026-03-01", "2026-04-01", "2026-07-01"):
-              try:
-                  input_receipts[release] = historical.fetch_release(release, releases)
-              except RuntimeError as exc:
-                  if release != "2026-01-01" or "Maximum (12) redirects followed" not in str(exc):
-                      raise
-                  unavailable_releases[release] = "official archive absent from the LANL archive index"
-                  input_receipts[release] = {
-                      "release": release,
-                      "status": "OFFICIAL_ARCHIVE_UNAVAILABLE",
-                      "official_archive_index_checked": True,
-                      "archive_bytes_read": 0,
-                      "target_rows_read": 0,
-                      "supervised_fits": 0,
-                      "real_august_rows_read": 0,
-                      "private_bytes_read": 0,
-                  }
-
-          summaries: list[dict[str, Any]] = []
-          total_fits = 0
-          fitted_paths: list[Path] = []
-          for training_release, target_release in WINDOWS:
-              output = windows_root / f"{training_release}_to_{target_release}"
-              missing = [
-                  release for release in (training_release, target_release)
-                  if release in unavailable_releases
-              ]
-              if missing:
-                  output.mkdir(parents=True)
-                  result = {
-                      "training_release": training_release,
-                      "target_release": target_release,
-                      "status": "TEMPORAL_UNAVAILABLE",
-                      "unavailable_releases": missing,
-                      "supervised_fits": 0,
-                      "criteria": {},
-                      "real_august_rows_read": 0,
-                      "real_august_values_read": 0,
-                      "private_bytes_read": 0,
-                  }
-                  (output / "ROUTER_WINDOW_RECEIPT.json").write_text(
-                      json.dumps(result, indent=2, sort_keys=True) + "\\n"
-                  )
-              else:
-                  result = execute_window(
-                      runner, legacy, orth, wrapper, historical, args.families, releases,
-                      training_release, target_release, output,
-                  )
-              summaries.append(result)
-              total_fits += int(result["supervised_fits"])
-              if result["status"] == "ROUTER_WINDOW_COMPLETE":
-                  fitted_paths.append(output)
-          '''
-          assert text.count(old_transport) == 1
-          text = text.replace(old_transport, new_transport)
-          router.write_text(text)
-          final_router_sha = hashlib.sha256(router.read_bytes()).hexdigest()
-          assert final_router_sha == '5b1ac2555a9f6cbdefab8e147f533076564c3aee0fc457449d16e2619ffa34ef'
-
+          assert hashlib.sha256(router.read_bytes()).hexdigest() == '5d8ced1d50e0193ce4d4a16037d2d043e36f09b8ff3731ab9ba9e62d49cbe606'
           fixed = {
               'lazarus-public-compute/lazarus_prospective_sealed_wrapper_v2.py': '5d354d5482c59be02fe7775849e6841b333d35617262e91c46fae633efd8cdf1',
-              'lazarus-public-compute/lazarus_historical_monthly_delta_v1.py': new_hash,
+              'lazarus-public-compute/lazarus_historical_monthly_delta_v1.py': 'eea8bca3aa52832c2f2e6ab1ad62ea973c238bc757cbd8a7391f6a1a7044fdc3',
               'lazarus-public-compute/frozen/primary_family_components_v1.csv': '6e7080e2d22e66322ea0884515be9ae5c6762eeb24acc16005ca45d68ecba788',
           }
           for name, expected in fixed.items():
               actual = hashlib.sha256(Path(name).read_bytes()).hexdigest()
               assert actual == expected, (name, actual, expected)
+          PY
+      - name: Apply frozen pre-output transport patch
+        run: |
+          python -m py_compile lazarus-public-compute/patch_regime_router_transport_v1.py
+          python lazarus-public-compute/patch_regime_router_transport_v1.py lazarus-public-compute/lazarus_regime_router_untouched_v1.py
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          path = Path('lazarus-public-compute/lazarus_regime_router_untouched_v1.py')
+          assert hashlib.sha256(path.read_bytes()).hexdigest() == '5b1ac2555a9f6cbdefab8e147f533076564c3aee0fc457449d16e2619ffa34ef'
           PY
       - name: Compile frozen router
         run: python -m py_compile lazarus-public-compute/lazarus_regime_router_untouched_v1.py
@@ -163,7 +84,6 @@ jobs:
           python - <<'PY'
           import hashlib, json
           from pathlib import Path
-
           root = Path('lazarus-public-compute/regime-router-untouched-v1-artifacts')
           summary = json.loads((root / 'ROUTER_TEMPORAL_SUMMARY.json').read_text())
           receipt = json.loads((root / 'ROUTER_TEMPORAL_RECEIPT.json').read_text())
@@ -194,9 +114,7 @@ jobs:
               'prospective_scientific_fits': 0,
               'private_bytes_read': 0,
           }
-          (root / 'RECURSIVE_ARTIFACT_MANIFEST.json').write_text(
-              json.dumps(manifest, indent=2, sort_keys=True) + '\n'
-          )
+          (root / 'RECURSIVE_ARTIFACT_MANIFEST.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
           print(json.dumps({
               'status': summary['status'],
               'windows_fitted': summary['windows_fitted'],
