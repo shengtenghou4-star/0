@@ -1,4 +1,4 @@
-name: BIO-001 S34 source structure audit
+name: BIO-001 S34 frozen result diagnostics
 
 on:
   pull_request:
@@ -6,104 +6,174 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
-  inspect:
+  diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Install source reader
-        run: python -m pip install "numpy==2.3.5" "scipy==1.17.0"
-
-      - name: Acquire and extract frozen archives
+      - name: Download immutable successful result artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          python tools/bio001_s34_acquire.py
-          mkdir -p s34_structure_data/training s34_structure_data/development
-          tar -xzf s34_artifacts/raw/AML310_moving.tar.gz -C s34_structure_data/training
-          tar -xzf s34_artifacts/raw/AML310_transition.tar.gz -C s34_structure_data/development
+          curl --fail --location --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --output s34_result.zip \
+            https://api.github.com/repos/shengtenghou4-star/0/actions/artifacts/8936538518/zip
+          mkdir -p s34_result
+          unzip -q s34_result.zip -d s34_result
 
-      - name: Inspect first training and development behavior cells
+      - name: Expand horizon recording and model diagnostics
         run: |
           python - <<'PY'
+          import hashlib
           import json
+          import math
           from pathlib import Path
-          import numpy as np
-          from scipy import io
 
-          def first_active_line(path):
-              for raw in path.read_text(encoding='utf-8').splitlines():
-                  line = raw.split('#', 1)[0].strip()
-                  if line:
-                      return line.split()[0]
-              raise RuntimeError(f'no active lines in {path}')
+          root = Path('s34_result')
+          results_path = next(root.rglob('development_results.json'))
+          extraction_path = next(root.rglob('extraction_receipt.json'))
+          model_path = next(root.rglob('frozen_model_pre_holdout.json'))
+          audit_path = next(root.rglob('independent_audit.json'))
+          run_path = next(root.rglob('run_receipt.json'))
 
-          def describe(role):
-              root = Path('s34_structure_data') / role
-              lists = sorted(root.rglob('*_datasets.txt'))
-              if len(lists) != 1:
-                  raise RuntimeError(f'{role}: dataset lists={lists}')
-              rid = first_active_line(lists[0])
-              folders = sorted(p for p in root.rglob(f'{rid}_MS') if p.is_dir())
-              if len(folders) != 1:
-                  raise RuntimeError(f'{role}: folders={folders}')
-              heat_path = folders[0] / 'heatDataMS.mat'
-              if not heat_path.exists():
-                  heat_path = folders[0] / 'heatData.mat'
-              data = io.loadmat(heat_path)
-              behavior = data['behavior']
-              cell = behavior[0][0]
-              record = {
-                  'role': role,
-                  'recording_id': rid,
-                  'behavior_type': type(behavior).__name__,
-                  'behavior_shape': list(behavior.shape),
-                  'behavior_dtype': str(behavior.dtype),
-                  'cell_type': type(cell).__name__,
-                  'cell_shape': list(getattr(cell, 'shape', ())),
-                  'cell_dtype': str(getattr(cell, 'dtype', None)),
-                  'cell_dtype_names': list(getattr(getattr(cell, 'dtype', None), 'names', ()) or ()),
-                  'transpose_type': type(cell.T).__name__,
-                  'transpose_shape': list(getattr(cell.T, 'shape', ())),
-                  'transpose_dtype': str(getattr(cell.T, 'dtype', None)),
-                  'elements': [],
-              }
-              array = cell.T
-              for index in np.ndindex(array.shape):
-                  element = array[index]
-                  record['elements'].append({
-                      'index': list(index),
-                      'type': type(element).__name__,
-                      'shape': list(getattr(element, 'shape', ())),
-                      'dtype': str(getattr(element, 'dtype', None)),
+          def sha(path):
+              h = hashlib.sha256()
+              with path.open('rb') as f:
+                  for block in iter(lambda: f.read(1024 * 1024), b''):
+                      h.update(block)
+              return h.hexdigest()
+
+          assert sha(extraction_path) == '4c4bf1bcd83efb3f1a2f9b3f3978cf6663a0e2279199f5041e19d372f7019896'
+          assert sha(model_path) == '3f144cf66722794b7d40ec37e0c35cef7bf1f6e1af5a77d2da87c1513041c8a8'
+          assert sha(results_path) == 'ffa190b1cd805ccbfe8619993c5fc23cce71b3b7abe897fbc51e8d8195888f30'
+
+          results = json.loads(results_path.read_text())
+          extraction = json.loads(extraction_path.read_text())
+          model = json.loads(model_path.read_text())
+          audit = json.loads(audit_path.read_text())
+          run = json.loads(run_path.read_text())
+          gate = results['development_gate']
+
+          def selected_candidate(family, alpha):
+              for candidate in family:
+                  if float(candidate['alpha']) == float(alpha):
+                      return candidate
+              raise KeyError(alpha)
+
+          m1_selected = selected_candidate(results['M1_candidates'], results['M1_selected_alpha'])
+          m2_selected = selected_candidate(results['M2_candidates'], results['M2_selected_alpha'])
+
+          per_horizon = {}
+          per_recording = {}
+          for horizon in ('1', '5', '10'):
+              gm = gate['horizons'][horizon]
+              m1_metrics = {x['recording_id']: x for x in m1_selected['development_metrics'][horizon]}
+              m2_metrics = {x['recording_id']: x for x in m2_selected['development_metrics'][horizon]}
+              rows = []
+              for rid in sorted(m2_metrics):
+                  m1 = m1_metrics[rid]
+                  m2 = m2_metrics[rid]
+                  rows.append({
+                      'recording_id': rid,
+                      'samples': m2['samples'],
+                      'M2_to_M1_RMSE_ratio': m2['rmse'] / m1['rmse'],
+                      'M2_to_persistence_RMSE_ratio': m2['model_to_persistence_rmse_ratio'],
+                      'M1_RMSE': m1['rmse'],
+                      'M2_RMSE': m2['rmse'],
+                      'persistence_RMSE': m2['persistence_rmse'],
+                      'M2_prediction_finite': m2['prediction_finite'],
                   })
-              return record
+              per_recording[horizon] = rows
+              per_horizon[horizon] = {
+                  'M2_to_M1_mean_ratio': gm['recording_balanced_mean_M2_to_M1_RMSE_ratio'],
+                  'M2_to_persistence_mean_ratio': gm['recording_balanced_mean_M2_to_persistence_RMSE_ratio'],
+                  'recordings_M2_beats_M1': sum(r['M2_to_M1_RMSE_ratio'] < 1 for r in rows),
+                  'recording_count': len(rows),
+              }
+
+          alpha_curves = {
+              'M1': [
+                  {
+                      'alpha': c['alpha'],
+                      'recording_balanced_mean_NRMSE': c['selection_recording_balanced_mean_nrmse'],
+                  }
+                  for c in results['M1_candidates']
+              ],
+              'M2': [
+                  {
+                      'alpha': c['alpha'],
+                      'recording_balanced_mean_NRMSE': c['selection_recording_balanced_mean_nrmse'],
+                  }
+                  for c in results['M2_candidates']
+              ],
+          }
+
+          coefficient_diagnostics = {}
+          for horizon, payload in model['M2_neural_plus_behavior']['models_by_horizon'].items():
+              coef = payload['coef']
+              behavior = coef[:14]
+              neural = coef[14:]
+              coefficient_diagnostics[horizon] = {
+                  'behavior_L2': math.sqrt(sum(x*x for x in behavior)),
+                  'neural_L2': math.sqrt(sum(x*x for x in neural)),
+                  'behavior_abs_sum': sum(abs(x) for x in behavior),
+                  'neural_abs_sum': sum(abs(x) for x in neural),
+                  'nonzero_behavior': sum(abs(x) > 1e-12 for x in behavior),
+                  'nonzero_neural': sum(abs(x) > 1e-12 for x in neural),
+              }
 
           payload = {
-              'schema': 'bio-001-s34-real-matlab-behavior-structure-audit-v1',
-              'training': describe('training'),
-              'development': describe('development'),
-              'numeric_values_read': False,
-              'sealed_holdout_requested': False,
-              'sealed_holdout_opened': False,
+              'schema': 'bio-001-s34-frozen-result-diagnostics-v1',
+              'artifact_id': 8936538518,
+              'source_run_id': 31020820102,
+              'source_artifact_digest': 'sha256:9977815c63ce2b0676a703fdd70859d1711d5cb05304eb4d1635536ae46c5fa2',
+              'run_status': run['status'],
+              'development_pass': gate['pass'],
+              'checks': gate['checks'],
+              'selected_alpha': {
+                  'M1_behavior_only': results['M1_selected_alpha'],
+                  'M2_neural_plus_behavior': results['M2_selected_alpha'],
+              },
+              'per_horizon': per_horizon,
+              'per_recording': per_recording,
+              'alpha_curves': alpha_curves,
+              'coefficient_diagnostics': coefficient_diagnostics,
+              'training_recordings': extraction['training']['recordings'],
+              'development_recordings': extraction['development']['recordings'],
+              'sample_counts': extraction['sample_counts'],
+              'independent_audit_status': audit['status'],
+              'holdout_requested': False,
+              'holdout_opened': False,
+              'CeRSI_v2_delta': 0.0,
           }
-          Path('s34_structure_audit.json').write_text(json.dumps(payload, indent=2, sort_keys=True))
-          print('BIO001_S34_STRUCTURE=' + json.dumps(payload, sort_keys=True))
+          Path('s34_result_diagnostics.json').write_text(
+              json.dumps(payload, indent=2, sort_keys=True, allow_nan=False)
+          )
+          compact = {
+              'status': payload['run_status'],
+              'per_horizon': per_horizon,
+              'h10_records': per_recording['10'],
+              'alpha_curves': alpha_curves,
+              'coefficient_diagnostics': coefficient_diagnostics,
+              'training_recording_count': len(payload['training_recordings']),
+              'development_recording_count': len(payload['development_recordings']),
+          }
+          print('BIO001_S34_DIAGNOSTICS=' + json.dumps(compact, sort_keys=True, allow_nan=False))
           PY
 
-      - name: Upload structure audit
+      - name: Upload frozen result diagnostics
         uses: actions/upload-artifact@v4
         with:
-          name: bio001-s34-source-structure-audit
-          path: s34_structure_audit.json
+          name: bio001-s34-frozen-result-diagnostics
+          path: s34_result_diagnostics.json
           compression-level: 9
           retention-days: 30
           if-no-files-found: error
