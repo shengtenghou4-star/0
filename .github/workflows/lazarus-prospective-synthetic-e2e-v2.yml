@@ -69,11 +69,11 @@ jobs:
           assert value['status'] == 'SYNTHETIC_SEALED_E2E_PASS'
           assert value['synthetic_only'] is True
           assert value['scientific_interpretation_forbidden'] is True
-          assert value['synthetic_target_rows'] >= 100
-          assert value['synthetic_potent_rows'] >= 25
-          assert value['synthetic_resistant_rows'] >= 25
-          assert value['synthetic_antibodies'] >= 8
-          assert value['synthetic_viruses'] >= 10
+          assert value['synthetic_target_rows'] >= 200
+          assert value['synthetic_potent_rows'] >= 40
+          assert value['synthetic_resistant_rows'] >= 40
+          assert value['synthetic_antibodies'] >= 10
+          assert value['synthetic_viruses'] >= 20
           assert value['synthetic_families'] >= 3
           assert value['training_overlap_pairs'] == 0
           assert value['actual_archive_hash_reverified'] is True
@@ -89,8 +89,11 @@ jobs:
           assert value['wrapped_runner_sha256'] == '3e27e43dc33ba8deac14d4b981cd8fe9d7d220cd01e908f31fee51fb4e9a200c'
           PY
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: lazarus-prospective-synthetic-sealed-e2e-v2
-          path: lazarus-public-compute/synthetic-sealed-e2e-v2-artifacts/SYNTHETIC_SEALED_E2E_RECEIPT.json
+          path: |
+            lazarus-public-compute/synthetic-sealed-e2e-v2-artifacts/SYNTHETIC_SEALED_E2E_RECEIPT.json
+            lazarus-public-compute/synthetic-sealed-e2e-v2-artifacts/SYNTHETIC_SEALED_E2E_DIAGNOSTIC.json
           if-no-files-found: error
           retention-days: 1
