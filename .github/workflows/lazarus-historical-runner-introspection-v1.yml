@@ -1,0 +1,74 @@
+name: LAZARUS historical runner introspection v1
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/lazarus-historical-runner-introspection-v1.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  introspect:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Decode reviewed runner and inspect interfaces
+        run: |
+          python - <<'PY'
+          import ast, base64, gzip, hashlib, inspect, json
+          from pathlib import Path
+          src = Path('lazarus-public-compute/payload/lazarus_prospective_snapshot_compute.py.gz.b64')
+          runner = Path('runner-introspection/lazarus_prospective_snapshot_compute.py')
+          runner.parent.mkdir(parents=True)
+          runner.write_bytes(gzip.decompress(base64.b64decode(src.read_text().strip())))
+          assert hashlib.sha256(runner.read_bytes()).hexdigest() == '3e27e43dc33ba8deac14d4b981cd8fe9d7d220cd01e908f31fee51fb4e9a200c'
+          text = runner.read_text()
+          tree = ast.parse(text)
+          functions = {}
+          for node in tree.body:
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                  functions[node.name] = {
+                      'args': [a.arg for a in node.args.args],
+                      'lineno': node.lineno,
+                      'end_lineno': getattr(node, 'end_lineno', None),
+                  }
+          constants = {}
+          for node in tree.body:
+              if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                  name = node.targets[0].id
+                  if name.isupper():
+                      try:
+                          constants[name] = ast.literal_eval(node.value)
+                      except Exception:
+                          constants[name] = '<nonliteral>'
+          wanted = ['execute', 'training_pairs', 'generic_matrix', 'metrics', 'adjudicate', 'main']
+          snippets = {}
+          lines = text.splitlines()
+          for name in wanted:
+              meta = functions.get(name)
+              if meta and meta['end_lineno']:
+                  snippets[name] = '\n'.join(lines[meta['lineno']-1:meta['end_lineno']])
+          out = {
+              'runner_sha256': hashlib.sha256(runner.read_bytes()).hexdigest(),
+              'functions': functions,
+              'constants': constants,
+              'snippets': snippets,
+              'target_rows_read': 0,
+              'supervised_fits': 0,
+              'private_bytes_read': 0,
+          }
+          Path('runner-introspection/INTERFACES.json').write_text(json.dumps(out, indent=2, sort_keys=True) + '\n')
+          print(json.dumps({'status':'PASS','functions':len(functions),'target_rows_read':0,'supervised_fits':0}, sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazarus-historical-runner-introspection-v1
+          path: runner-introspection/INTERFACES.json
+          if-no-files-found: error
+          retention-days: 1
