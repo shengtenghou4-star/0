@@ -1,16 +1,31 @@
 {
-  "runs": [
-    {
-      "conclusion": "failure",
-      "created_at": "2026-08-05T16:38:34Z",
-      "head_sha": "45a7d2f9ed332dd0384737185616bdce65f9228a",
-      "html_url": "https://github.com/shengtenghou4-star/0/actions/runs/31026240938",
-      "id": 31026240938,
-      "run_number": 1,
-      "status": "completed",
-      "updated_at": "2026-08-05T16:38:47Z"
-    }
-  ],
-  "schema": 1,
-  "workflow": "zal-dual-bound-build-audit.yml"
+  "schema": 2,
+  "workflows": {
+    "audit-zal-dual-bound-package.yml": [
+      {
+        "conclusion": "success",
+        "created_at": "2026-08-05T16:43:37Z",
+        "head_sha": "6ceec6b0c824f89865d1b323b7b1324871f37ac4",
+        "html_url": "https://github.com/shengtenghou4-star/0/actions/runs/31026637464",
+        "id": 31026637464,
+        "run_attempt": 1,
+        "run_number": 1,
+        "status": "completed",
+        "updated_at": "2026-08-05T16:43:47Z"
+      }
+    ],
+    "zal-dual-bound-build-audit.yml": [
+      {
+        "conclusion": "success",
+        "created_at": "2026-08-05T16:38:34Z",
+        "head_sha": "45a7d2f9ed332dd0384737185616bdce65f9228a",
+        "html_url": "https://github.com/shengtenghou4-star/0/actions/runs/31026240938",
+        "id": 31026240938,
+        "run_attempt": 2,
+        "run_number": 1,
+        "status": "completed",
+        "updated_at": "2026-08-05T16:41:52Z"
+      }
+    ]
+  }
 }
