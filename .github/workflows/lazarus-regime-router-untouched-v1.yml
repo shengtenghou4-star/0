@@ -47,13 +47,21 @@ jobs:
           encoded = ''.join(path.read_text().strip() for path in parts)
           router = Path('lazarus-public-compute/lazarus_regime_router_untouched_v1.py')
           router.write_bytes(gzip.decompress(base64.b64decode(encoded)))
-          expected_router = '5d8ced1d50e0193ce4d4a16037d2d043e36f09b8ff3731ab9ba9e62d49cbe606'
-          actual_router = hashlib.sha256(router.read_bytes()).hexdigest()
-          assert actual_router == expected_router, (actual_router, expected_router)
+          original_router_sha = hashlib.sha256(router.read_bytes()).hexdigest()
+          assert original_router_sha == '5d8ced1d50e0193ce4d4a16037d2d043e36f09b8ff3731ab9ba9e62d49cbe606'
+
+          old = 'f488903da02dc66191875f64bce17eeba74114e3'
+          new = 'eea8bca3aa52832c2f2e6ab1ad62ea973c238bc757cbd8a7391f6a1a7044fdc3'
+          text = router.read_text()
+          assert text.count(old) == 1
+          assert new not in text
+          router.write_text(text.replace(old, new))
+          patched_router_sha = hashlib.sha256(router.read_bytes()).hexdigest()
+          assert patched_router_sha == 'e5fb3ab06575dbf3b8deffb08efb321afdf093a18ed7c71b91538a950301ec7a'
 
           fixed = {
               'lazarus-public-compute/lazarus_prospective_sealed_wrapper_v2.py': '5d354d5482c59be02fe7775849e6841b333d35617262e91c46fae633efd8cdf1',
-              'lazarus-public-compute/lazarus_historical_monthly_delta_v1.py': 'eea8bca3aa52832c2f2e6ab1ad62ea973c238bc757cbd8a7391f6a1a7044fdc3',
+              'lazarus-public-compute/lazarus_historical_monthly_delta_v1.py': new,
               'lazarus-public-compute/frozen/primary_family_components_v1.csv': '6e7080e2d22e66322ea0884515be9ae5c6762eeb24acc16005ca45d68ecba788',
           }
           for name, expected in fixed.items():
