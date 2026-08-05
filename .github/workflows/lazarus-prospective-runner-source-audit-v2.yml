@@ -1,0 +1,75 @@
+name: LAZARUS prospective runner source audit v2
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/lazarus-prospective-runner-source-audit-v2.yml"
+      - "lazarus-public-compute/payload/lazarus_prospective_snapshot_compute.py.gz.b64"
+
+permissions:
+  contents: read
+
+jobs:
+  source-audit:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Decode and hash-lock the frozen runner
+        run: |
+          python - <<'PY'
+          import ast, base64, gzip, hashlib, json
+          from pathlib import Path
+
+          source_path = Path('lazarus-public-compute/payload/lazarus_prospective_snapshot_compute.py.gz.b64')
+          out = Path('runner-source-audit-v2')
+          out.mkdir()
+          runner = out / 'lazarus_prospective_snapshot_compute.py'
+          runner.write_bytes(gzip.decompress(base64.b64decode(source_path.read_text().strip())))
+          digest = hashlib.sha256(runner.read_bytes()).hexdigest()
+          assert digest == '3e27e43dc33ba8deac14d4b981cd8fe9d7d220cd01e908f31fee51fb4e9a200c'
+          text = runner.read_text(encoding='utf-8')
+          tree = ast.parse(text)
+          imports = sorted({
+              node.names[0].name if isinstance(node, ast.Import) else node.module or ''
+              for node in ast.walk(tree)
+              if isinstance(node, (ast.Import, ast.ImportFrom))
+          })
+          fit_calls = 0
+          write_calls = 0
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                  if node.func.attr == 'fit':
+                      fit_calls += 1
+                  if node.func.attr in {'write_text', 'write_bytes', 'writerow', 'writerows'}:
+                      write_calls += 1
+          receipt = {
+              'schema_version': '1.0',
+              'status': 'SOURCE_AUDIT_EXTRACTED',
+              'runner_sha256': digest,
+              'source_bytes': runner.stat().st_size,
+              'source_lines': len(text.splitlines()),
+              'ast_nodes': sum(1 for _ in ast.walk(tree)),
+              'imports': imports,
+              'fit_call_sites': fit_calls,
+              'write_call_sites': write_calls,
+              'target_rows_parsed': 0,
+              'target_values_read': 0,
+              'supervised_fits': 0,
+              'private_bytes_read': 0,
+          }
+          (out / 'SOURCE_AUDIT.json').write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(receipt, sort_keys=True))
+          PY
+      - name: Compile frozen runner
+        run: python -m py_compile runner-source-audit-v2/lazarus_prospective_snapshot_compute.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazarus-prospective-runner-source-audit-v2
+          path: runner-source-audit-v2
+          if-no-files-found: error
+          retention-days: 1
