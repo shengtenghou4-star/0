@@ -1,0 +1,15 @@
+{
+  "runs": [
+    {
+      "conclusion": "failure",
+      "created_at": "2026-08-05T19:51:20Z",
+      "head_sha": "2ad7e65d71dbdaf41d3a0c1b2ec070749a724382",
+      "id": 31041340106,
+      "run_attempt": 1,
+      "status": "completed",
+      "updated_at": "2026-08-05T19:51:30Z"
+    }
+  ],
+  "schema": 1,
+  "workflow": "audit-zal-residual9-staged-case.yml"
+}
