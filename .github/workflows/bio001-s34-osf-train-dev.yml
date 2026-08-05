@@ -22,13 +22,17 @@ jobs:
           python-version: "3.13"
           cache: pip
 
-      - name: Verify frozen code blobs
+      - name: Verify frozen code and result-preceding erratum blobs
         shell: bash
         run: |
           set -euo pipefail
           test "$(git hash-object tools/s34_runtime/official_loader_port.py)" = "5d52037432c93ed8b5531faf4edb15533e7c5504"
           test "$(git hash-object tools/s34_runtime/train_dev_pipeline.py)" = "a8f5c47f63bc4a2dedd06dd4269327205c816ae9"
-          python -m py_compile tools/s34_runtime/official_loader_port.py tools/s34_runtime/train_dev_pipeline.py
+          test "$(git hash-object tools/s34_runtime/run_s34_pipeline.py)" = "e937211528d575f340ed958a59fbb0bf9044ba59"
+          python -m py_compile \
+            tools/s34_runtime/official_loader_port.py \
+            tools/s34_runtime/train_dev_pipeline.py \
+            tools/s34_runtime/run_s34_pipeline.py
 
       - name: Install frozen runtime
         run: |
@@ -46,11 +50,11 @@ jobs:
           tar -xzf s34_artifacts/raw/AML310_moving.tar.gz -C s34_runtime_data/training
           tar -xzf s34_artifacts/raw/AML310_transition.tar.gz -C s34_runtime_data/development
 
-      - name: Run frozen M0 M1 M2 training-development protocol
+      - name: Run frozen M0 M1 M2 protocol with source-structure erratum
         env:
           PYTHONPATH: tools/s34_runtime
         run: |
-          python tools/s34_runtime/train_dev_pipeline.py \
+          python tools/s34_runtime/run_s34_pipeline.py \
             --training-root s34_runtime_data/training \
             --development-root s34_runtime_data/development \
             --output s34_runtime_output
@@ -61,6 +65,7 @@ jobs:
           python - <<'PY'
           import hashlib
           import json
+          import re
           from pathlib import Path
 
           root = Path('.')
@@ -69,6 +74,7 @@ jobs:
           nonaccess = json.loads((root / 's34_artifacts/holdout_nonaccess_receipt.json').read_text())
           results = json.loads((out / 'development_results.json').read_text())
           receipt = json.loads((out / 'run_receipt.json').read_text())
+          erratum = json.loads((out / 'source_structure_erratum_receipt.json').read_text())
 
           expected = {
               'AML310_moving.tar.gz': (348_444_164, '144126ee9a49d311c3393deea434e1a0963d55de35318e25d98d48f9c175250a'),
@@ -81,6 +87,11 @@ jobs:
           assert nonaccess['sealed_holdout_requested'] is False
           assert nonaccess['sealed_holdout_downloaded'] is False
           assert nonaccess['sealed_holdout_listed_or_opened'] is False
+          assert erratum['private_erratum_commit'] == '935ce787ba3a302782ad3de2346912ab493ffeaf'
+          assert erratum['numeric_transformation'] is False
+          assert erratum['squeeze_or_reshape_fields'] is False
+          assert erratum['holdout_requested'] is False
+          assert erratum['holdout_opened'] is False
 
           gate = results['development_gate']
           horizons = gate['horizons']
@@ -99,15 +110,21 @@ jobs:
           assert receipt['holdout_requested'] is False
           assert receipt['holdout_opened'] is False
 
-          code_text = '\n'.join([
-              (root / 'tools/s34_runtime/official_loader_port.py').read_text(),
-              (root / 'tools/s34_runtime/train_dev_pipeline.py').read_text(),
-              (root / 'tools/bio001_s34_acquire.py').read_text(),
-          ])
-          assert 'osf.io/download/evhrg/' in code_text
-          assert 'osf.io/download/4u8h2/' in code_text
-          assert 'AML32_chip.tar.gz' not in code_text
-          assert 'AML32_chip' in code_text
+          code_paths = [
+              root / 'tools/s34_runtime/official_loader_port.py',
+              root / 'tools/s34_runtime/train_dev_pipeline.py',
+              root / 'tools/s34_runtime/run_s34_pipeline.py',
+              root / 'tools/bio001_s34_acquire.py',
+          ]
+          code_text = '\n'.join(path.read_text() for path in code_paths)
+          osf_urls = sorted(set(re.findall(r'https://osf\.io/download/[a-z0-9]+/', code_text)))
+          assert osf_urls == [
+              'https://osf.io/download/4u8h2/',
+              'https://osf.io/download/evhrg/',
+          ], osf_urls
+          assert code_text.count('AML32_chip.tar.gz') == 1
+          assert 'FORBIDDEN = {"AML32_chip.tar.gz"}' in code_text
+          assert 'SEALED_TOKEN = "AML32_chip"' in code_text
 
           def sha(path: Path) -> str:
               h = hashlib.sha256()
@@ -117,11 +134,14 @@ jobs:
               return h.hexdigest()
 
           audit = {
-              'schema': 'bio-001-s34-independent-arithmetic-provenance-audit-v1',
+              'schema': 'bio-001-s34-independent-arithmetic-provenance-audit-v2',
               'status': 'PASS',
               'source_bytes_and_sha256': 'PASS',
               'frozen_loader_git_blob': '5d52037432c93ed8b5531faf4edb15533e7c5504',
               'frozen_pipeline_git_blob': 'a8f5c47f63bc4a2dedd06dd4269327205c816ae9',
+              'source_erratum_adapter_git_blob': 'e937211528d575f340ed958a59fbb0bf9044ba59',
+              'source_erratum_private_commit': '935ce787ba3a302782ad3de2346912ab493ffeaf',
+              'executable_osf_urls': osf_urls,
               'holdout_nonaccess': 'PASS',
               'gate_recalculation': 'PASS',
               'development_pass': gate['pass'],
