@@ -1,15 +1,27 @@
 {
-  "runs": [
-    {
-      "conclusion": "failure",
-      "created_at": "2026-08-05T19:51:20Z",
-      "head_sha": "2ad7e65d71dbdaf41d3a0c1b2ec070749a724382",
-      "id": 31041340106,
-      "run_attempt": 1,
-      "status": "completed",
-      "updated_at": "2026-08-05T19:51:30Z"
-    }
-  ],
-  "schema": 1,
-  "workflow": "audit-zal-residual9-staged-case.yml"
+  "schema": 2,
+  "workflows": {
+    "audit-zal-residual9-staged-case-v2.yml": [
+      {
+        "conclusion": "success",
+        "created_at": "2026-08-05T19:53:02Z",
+        "head_sha": "57555c5f24d48d3630d357085ac32bdea4bff058",
+        "id": 31041471879,
+        "run_attempt": 1,
+        "status": "completed",
+        "updated_at": "2026-08-05T19:53:11Z"
+      }
+    ],
+    "audit-zal-residual9-staged-case.yml": [
+      {
+        "conclusion": "failure",
+        "created_at": "2026-08-05T19:51:20Z",
+        "head_sha": "2ad7e65d71dbdaf41d3a0c1b2ec070749a724382",
+        "id": 31041340106,
+        "run_attempt": 1,
+        "status": "completed",
+        "updated_at": "2026-08-05T19:51:30Z"
+      }
+    ]
+  }
 }
