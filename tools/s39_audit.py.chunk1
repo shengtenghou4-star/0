@@ -1,0 +1,108 @@
+# Load frozen source for causality and delayed-feedback sentinels.
+spec = importlib.util.spec_from_file_location('s39_audit_target', ROOT / 'tools/s39_pipeline.py')
+assert spec is not None and spec.loader is not None
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+
+# Control determinism and equal treatment.
+for rid, receipt in p1['record_receipts'].items():
+    assert set(receipt['controls']) == set(SOURCES)
+    for src in SOURCES:
+        got = receipt['controls'][src]
+        assert got['seed'] == mod.stable_seed(rid, src)
+        assert got['finite'] is True
+        assert got['offline_negative_control'] is (src != 'REAL')
+    for ep in ENDPOINTS:
+        assert ep in receipt['event_counts']
+
+# Future behavior modification sentinel: distant future cannot change past causal state/features or matured labels.
+n = 320
+frames = np.arange(n, dtype=int)
+velocity = 0.5 * np.sin(frames / 18.0) + 0.12 * np.sin(frames / 4.0)
+curvature = 0.8 * np.sin(frames / 13.0)
+raw = np.column_stack([np.sin(frames / 7 + j) for j in range(4)])
+warm = frames <= 120
+med = np.median(raw[warm], axis=0)
+mad = np.median(np.abs(raw[warm] - med), axis=0)
+scale = 1.4826 * mad
+scale[scale < 1e-12] = 1.0
+rec1 = mod.RecordBase('synthetic', frames, velocity, curvature, raw, 120, 4, med, scale)
+bs1 = mod.derive_behavior_state(rec1)
+velocity2 = velocity.copy(); curvature2 = curvature.copy()
+velocity2[250:] += 20.0
+curvature2[250:] -= 30.0
+rec2 = mod.RecordBase('synthetic', frames, velocity2, curvature2, raw, 120, 4, med, scale)
+bs2 = mod.derive_behavior_state(rec2)
+assert np.array_equal(bs1.state[:250], bs2.state[:250])
+assert np.allclose(bs1.v_ema[:250], bs2.v_ema[:250], rtol=0, atol=0)
+assert np.allclose(bs1.k_ema[:250], bs2.k_ema[:250], rtol=0, atol=0)
+for f in range(30, 225):
+    a = mod.behavior_features(rec1, bs1, f)
+    b = mod.behavior_features(rec2, bs2, f)
+    if a is not None and b is not None:
+        assert np.allclose(a, b, rtol=0, atol=0)
+for ep, (_kind, horizon) in mod.ENDPOINTS.items():
+    for f in range(30, 250 - horizon - mod.PERSIST):
+        assert mod.event_label(bs1, f, _kind, horizon) == mod.event_label(bs2, f, _kind, horizon)
+
+# Delayed feedback sentinel: labels cannot influence probabilities before reveal.
+current = np.arange(0, 220, dtype=int)
+reveal = current + 12
+X = np.column_stack([np.sin(current / 9), np.cos(current / 17), current / 220])
+y1 = ((current // 17) % 2).astype(float)
+y2 = y1.copy(); y2[reveal >= 170] = 1.0 - y2[reveal >= 170]
+warm_mask = reveal <= 90
+scored_mask = current >= 110
+ev1 = mod.EventSet(current, reveal, X, y1, warm_mask, scored_mask)
+ev2 = mod.EventSet(current, reveal, X, y2, warm_mask, scored_mask)
+s1 = mod.prequential(ev1, 10.0)
+s2 = mod.prequential(ev2, 10.0)
+early = s1.current_frames < 170
+assert np.array_equal(s1.current_frames, s2.current_frames)
+assert np.allclose(s1.p[early], s2.p[early], rtol=0, atol=0)
+
+assert p1['development_evaluation_executed'] is False
+assert p1['development_source_accessed_by_this_run'] is False
+assert p1['AML32_chip_requested'] is False
+assert p1['AML32_chip_listed'] is False
+assert p1['AML32_chip_downloaded'] is False
+assert p1['AML32_chip_opened'] is False
+
+audit = {
+    'schema': 'bio-001-s39-independent-audit-v1',
+    'status': 'PASS',
+    'pipeline_sha256': sha(ROOT / 'tools/s39_pipeline.py'),
+    'primary_result_sha256': sha(ROOT / 's39_output_primary/s39_training_result.json'),
+    'rerun_result_sha256': sha(ROOT / 's39_output_rerun/s39_training_result.json'),
+    'exact_rerun': True,
+    'event_support_and_gate_recalculation': 'PASS',
+    'negative_control_seed_and_equal_treatment_audit': 'PASS',
+    'future_behavior_causality_sentinel': 'PASS',
+    'delayed_feedback_sentinel': 'PASS',
+    'holdout_nonaccess': 'PASS',
+    'passed_checks': p1['passed_checks'],
+    'total_checks': p1['total_checks'],
+    'training_pass': p1['status'] == 'TRAINING_PASS',
+    'verdict': p1['verdict'],
+    'CeRSI_v2_delta': 0.0,
+}
+(ROOT / 's39_independent_audit.json').write_text(json.dumps(audit, indent=2, sort_keys=True, allow_nan=False))
+compact = {
+    'status': r1['status'],
+    'verdict': p1['verdict'],
+    'checks': p1['checks'],
+    'summaries': p1['summaries'],
+    'control_comparisons': p1['control_comparisons'],
+    'max_real_ratio': p1['maximum_real_outer_any_endpoint_model_to_B1_ratio'],
+    'outer_real': {
+        rid: {
+            ep: p1['outer'][rid]['endpoints'][ep]['sources']['REAL']
+            for ep in ENDPOINTS
+        }
+        for rid in ids
+    },
+    'event_counts': {rid: p1['record_receipts'][rid]['event_counts'] for rid in ids},
+    'holdout_opened': False,
+}
+print('BIO001_S39_RESULT=' + json.dumps(compact, sort_keys=True, allow_nan=False))
