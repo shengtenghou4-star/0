@@ -1,0 +1,75 @@
+name: BIO-001 S37 horizon-specific regret guard
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  s37-training:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install frozen runtime
+        run: python -m pip install "numpy==2.3.5" "scipy==1.17.0"
+
+      - name: Decode and verify frozen scientific pipeline
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d tools/s37_pipeline.py.gz.b64 | gzip -d > tools/s37_pipeline.py
+          test "$(sha256sum tools/s37_pipeline.py | awk '{print $1}')" = "0c5132213b58d0ec3ab241cb4bc020f35c69284f1d9d3fcc7f07fb1354ed0e5d"
+          test "$(sha256sum tools/s37_audit.py | awk '{print $1}')" = "177abfe4011777447160560ddb83c7274d7450fd56e3453507009a7e96ebc326"
+          python -m py_compile tools/s37_pipeline.py tools/s37_audit.py tools/bio001_s37_acquire.py
+
+      - name: Acquire and extract verified training archive only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/bio001_s37_acquire.py
+          mkdir -p s37_data/training
+          tar -xzf s37_artifacts/raw/AML310_moving.tar.gz -C s37_data/training
+
+      - name: Execute frozen primary and exact rerun
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/s37_pipeline.py --training-root s37_data/training --output s37_output_primary
+          python tools/s37_pipeline.py --training-root s37_data/training --output s37_output_rerun
+
+      - name: Independent arithmetic provenance causality and retirement audit
+        run: python tools/s37_audit.py
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p s37_evidence
+          cp tools/s37_pipeline.py tools/s37_audit.py s37_evidence/
+          cp s37_output_primary/*.json s37_evidence/
+          cp s37_output_rerun/*.json s37_evidence/
+          cp s37_independent_audit.json s37_evidence/
+          cp s37_artifacts/source_manifest.json s37_evidence/
+          cp s37_artifacts/holdout_nonaccess_receipt.json s37_evidence/
+          (cd s37_evidence && sha256sum * > manifest.sha256)
+
+      - name: Upload S37 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s37-horizon-regret-evidence
+          path: s37_evidence/
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: warn
