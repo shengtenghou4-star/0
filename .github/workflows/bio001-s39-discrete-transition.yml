@@ -1,0 +1,82 @@
+name: BIO-001 S39 discrete transition specificity
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  s39-training:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install frozen runtime
+        run: python -m pip install "numpy==2.3.5" "scipy==1.17.0"
+
+      - name: Assemble and verify frozen executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum tools/s39_pipeline.py.chunk0 | awk '{print $1}')" = "1cc83815801bc73160586c3f2a0f72c026797d4bc367bc7973af96546609817c"
+          test "$(sha256sum tools/s39_pipeline.py.chunk1 | awk '{print $1}')" = "703ffcc704cdb8c65760ff2faedeb0a290278df151ff55bc6143f56a41346bf4"
+          test "$(sha256sum tools/s39_pipeline.py.chunk2 | awk '{print $1}')" = "93a214da6ef64c0680d05d07864fa778e2a788bd99220b5aa9c7bafe2c957304"
+          test "$(sha256sum tools/s39_pipeline.py.chunk3 | awk '{print $1}')" = "a4a1d42aadcfb284b154ecd826c95d48c705fe440668f37d45ec14a2de0a0f78"
+          cat tools/s39_pipeline.py.chunk0 tools/s39_pipeline.py.chunk1 tools/s39_pipeline.py.chunk2 tools/s39_pipeline.py.chunk3 > tools/s39_pipeline.py
+          test "$(sha256sum tools/s39_pipeline.py | awk '{print $1}')" = "1b0219df40fd6603cac0f69befe506287737746a9ebc684c01b1cb7711eccd6c"
+          test "$(sha256sum tools/s39_audit.py.chunk0 | awk '{print $1}')" = "42e2f50018aa111c6abe1c40d23ab1f2f8b9878e9932cf0d0fcf6206e59e80ee"
+          test "$(sha256sum tools/s39_audit.py.chunk1 | awk '{print $1}')" = "db847873978a5fdcd13ca08d4edf5cdf09c9c9b11604c8e3bbdd8c43bee5b6cb"
+          cat tools/s39_audit.py.chunk0 tools/s39_audit.py.chunk1 > tools/s39_audit.py
+          test "$(sha256sum tools/s39_audit.py | awk '{print $1}')" = "43a8587c762ee7e49d138943e98cf2806ff42b6506ea3fa6a225f78968e374ce"
+          python -m py_compile tools/s39_pipeline.py tools/s39_audit.py tools/bio001_s39_acquire.py
+
+      - name: Acquire and extract verified training archive only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/bio001_s39_acquire.py
+          mkdir -p s39_data/training
+          tar -xzf s39_artifacts/raw/AML310_moving.tar.gz -C s39_data/training
+
+      - name: Execute frozen primary and exact rerun
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/s39_pipeline.py --training-root s39_data/training --output s39_output_primary
+          python tools/s39_pipeline.py --training-root s39_data/training --output s39_output_rerun
+
+      - name: Independent event causality control and nonaccess audit
+        run: python tools/s39_audit.py
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p s39_evidence
+          cp tools/s39_pipeline.py tools/s39_audit.py s39_evidence/
+          cp s39_output_primary/*.json s39_evidence/
+          cp s39_output_rerun/*.json s39_evidence/
+          cp s39_independent_audit.json s39_evidence/
+          cp s39_artifacts/source_manifest.json s39_evidence/
+          cp s39_artifacts/holdout_nonaccess_receipt.json s39_evidence/
+          (cd s39_evidence && sha256sum * > manifest.sha256)
+
+      - name: Upload S39 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s39-discrete-transition-evidence
+          path: s39_evidence/
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: warn
