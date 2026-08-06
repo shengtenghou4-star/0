@@ -131,7 +131,7 @@ tf = cf + 1
 y = np.zeros(100)
 persist = np.zeros(100)
 m1 = mod.PredictionStream(cf, tf, y, persist, np.ones(100))
-m2_pred = np.concatenate([np.zeros(35), np.full(65, 3.0)])
+m2_pred = np.concatenate([np.zeros(20), np.full(80, 3.0)])
 m2 = mod.PredictionStream(cf, tf, y, persist, m2_pred)
 _p4, weights, diag = mod.regret_guard_stream(m1, m2, 10, 1.0, 0.01, 4.0)
 assert diag['retired'] is True
