@@ -29,8 +29,8 @@ jobs:
         run: |
           set -euo pipefail
           base64 -d tools/s38_pipeline.py.gz.b64 | gzip -d > tools/s38_pipeline.py
-          test "$(sha256sum tools/s38_pipeline.py | awk '{print $1}')" = "580396b09e9dd61ba9d0b1ec34d63b80b00f31a47716ec5325720b3855b865c9"
-          test "$(sha256sum tools/s38_audit.py | awk '{print $1}')" = "a902de147b85cfb7d497ea4f22aa6776343691708573166e1a781c1838ec9e60"
+          test "$(sha256sum tools/s38_pipeline.py | awk '{print $1}')" = "077150c5846941ee38966f905cad8a1f4a662c9f476bc30e867626a11b754848"
+          test "$(sha256sum tools/s38_audit.py | awk '{print $1}')" = "1340d731e4d655e2eae6b47e265a9534763a100111f4f70d3262df9ec8de5db8"
           python -m py_compile tools/s38_pipeline.py tools/s38_audit.py tools/bio001_s38_acquire.py
 
       - name: Acquire and extract verified training archive only
