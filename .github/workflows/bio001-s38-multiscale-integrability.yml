@@ -1,0 +1,75 @@
+name: BIO-001 S38 multiscale causal integrability
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  s38-training:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install frozen runtime
+        run: python -m pip install "numpy==2.3.5" "scipy==1.17.0"
+
+      - name: Decode and verify frozen scientific pipeline
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d tools/s38_pipeline.py.gz.b64 | gzip -d > tools/s38_pipeline.py
+          test "$(sha256sum tools/s38_pipeline.py | awk '{print $1}')" = "580396b09e9dd61ba9d0b1ec34d63b80b00f31a47716ec5325720b3855b865c9"
+          test "$(sha256sum tools/s38_audit.py | awk '{print $1}')" = "a902de147b85cfb7d497ea4f22aa6776343691708573166e1a781c1838ec9e60"
+          python -m py_compile tools/s38_pipeline.py tools/s38_audit.py tools/bio001_s38_acquire.py
+
+      - name: Acquire and extract verified training archive only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/bio001_s38_acquire.py
+          mkdir -p s38_data/training
+          tar -xzf s38_artifacts/raw/AML310_moving.tar.gz -C s38_data/training
+
+      - name: Execute frozen primary and exact rerun
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/s38_pipeline.py --training-root s38_data/training --output s38_output_primary
+          python tools/s38_pipeline.py --training-root s38_data/training --output s38_output_rerun
+
+      - name: Independent arithmetic controls causality and nonaccess audit
+        run: python tools/s38_audit.py
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p s38_evidence
+          cp tools/s38_pipeline.py tools/s38_audit.py s38_evidence/
+          cp s38_output_primary/*.json s38_evidence/
+          cp s38_output_rerun/*.json s38_evidence/
+          cp s38_independent_audit.json s38_evidence/
+          cp s38_artifacts/source_manifest.json s38_evidence/
+          cp s38_artifacts/holdout_nonaccess_receipt.json s38_evidence/
+          (cd s38_evidence && sha256sum * > manifest.sha256)
+
+      - name: Upload S38 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s38-multiscale-integrability-evidence
+          path: s38_evidence/
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: warn
