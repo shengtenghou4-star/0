@@ -1,0 +1,211 @@
+                behavior_stream_cache[(rid, endpoint, alpha)] = s
+                behavior_metric_cache[(rid, endpoint, alpha)] = metric(s)
+
+    neural_configs = all_neural_configs()
+    neural_cache: dict[tuple[str, str, str, str, float], tuple[ProbabilityStream, dict[str, Any]]] = {}
+
+    def neural_result(rid: str, endpoint: str, source: str, cfg: dict[str, Any], base_alpha: float) -> tuple[ProbabilityStream, dict[str, Any]]:
+        key = (rid, endpoint, source, cfg_id(cfg), base_alpha)
+        if key in neural_cache:
+            return neural_cache[key]
+        base_stream = behavior_stream_cache[(rid, endpoint, base_alpha)]
+        if cfg.get("off", False):
+            out = (base_stream, metric(base_stream))
+            neural_cache[key] = out
+            return out
+        scores = score_cache[(rid, source, cfg["lambda_cov"])].scores
+        ev = build_events(transformed[(rid, source)], bstates[rid], endpoint, scores, cfg["family"], cfg["k"])
+        ns = prequential(ev, cfg["alpha"])
+        assert_aligned(base_stream, ns)
+        out = (ns, metric(ns))
+        neural_cache[key] = out
+        return out
+
+    def select_base(inner: list[str], endpoint: str) -> tuple[float, dict[str, Any]]:
+        rows = []
+        for alpha in BASE_ALPHAS:
+            mets = [behavior_metric_cache[(rid, endpoint, alpha)] for rid in inner]
+            mean = float(np.mean([m["brier"] for m in mets]))
+            worst = float(max(m["brier"] for m in mets))
+            rows.append((mean, worst, alpha))
+        rows.sort()
+        mean, worst, alpha = rows[0]
+        return float(alpha), {"inner_mean_brier": mean, "inner_max_brier": worst}
+
+    def select_neural(inner: list[str], endpoint: str, source: str, base_alpha: float) -> tuple[dict[str, Any], dict[str, Any]]:
+        eligible = []
+        for cfg in neural_configs:
+            ratios = []
+            briers = []
+            for rid in inner:
+                _, nm = neural_result(rid, endpoint, source, cfg, base_alpha)
+                bm = behavior_metric_cache[(rid, endpoint, base_alpha)]
+                ratios.append(nm["brier"] / max(bm["brier"], EPS))
+                briers.append(nm["brier"])
+            max_ratio = float(max(ratios))
+            if max_ratio <= INNER_SAFETY + 1e-15:
+                eligible.append((float(np.mean(briers)), max_ratio, float(np.mean(ratios)), cfg_key(cfg), cfg))
+        if not eligible:
+            raise RuntimeError(f"no eligible config {source} {endpoint}")
+        eligible.sort(key=lambda z: (z[0], z[1], z[2], z[3]))
+        mean_b, max_r, mean_r, _key, cfg = eligible[0]
+        return dict(cfg), {
+            "inner_mean_brier": mean_b,
+            "inner_max_model_to_B1": max_r,
+            "inner_mean_model_to_B1": mean_r,
+            "inner_safety_ceiling": INNER_SAFETY,
+        }
+
+    outer: dict[str, Any] = {}
+    for outer_id in ids:
+        inner = [rid for rid in ids if rid != outer_id]
+        endpoint_rows: dict[str, Any] = {}
+        for endpoint in ENDPOINTS:
+            base_alpha, base_sel = select_base(inner, endpoint)
+            base_stream = behavior_stream_cache[(outer_id, endpoint, base_alpha)]
+            bm = behavior_metric_cache[(outer_id, endpoint, base_alpha)]
+            source_rows: dict[str, Any] = {}
+            for source in SOURCES:
+                cfg, sel = select_neural(inner, endpoint, source, base_alpha)
+                ns, nm = neural_result(outer_id, endpoint, source, cfg, base_alpha)
+                assert_aligned(base_stream, ns)
+                ratio = nm["brier"] / max(bm["brier"], EPS)
+                source_rows[source] = {
+                    "selected_config": cfg,
+                    "selection_receipt": sel,
+                    "metric": nm,
+                    "model_to_B1_brier_ratio": ratio,
+                }
+            endpoint_rows[endpoint] = {
+                "selected_behavior_alpha": base_alpha,
+                "behavior_selection_receipt": base_sel,
+                "behavior_metric": bm,
+                "support_ok": support_ok(endpoint, bm),
+                "sources": source_rows,
+            }
+        outer[outer_id] = {"endpoints": endpoint_rows}
+
+    summaries: dict[str, Any] = {source: {} for source in SOURCES}
+    for source in SOURCES:
+        for endpoint in ENDPOINTS:
+            ratios = [outer[rid]["endpoints"][endpoint]["sources"][source]["model_to_B1_brier_ratio"] for rid in ids]
+            briers = [outer[rid]["endpoints"][endpoint]["sources"][source]["metric"]["brier"] for rid in ids]
+            summaries[source][endpoint] = {
+                "recording_count": len(ids),
+                "recording_balanced_mean_brier": float(np.mean(briers)),
+                "recording_balanced_mean_model_to_B1_ratio": float(np.mean(ratios)),
+                "recordings_model_beats_B1": int(sum(x < 1.0 for x in ratios)),
+                "maximum_outer_model_to_B1_ratio": float(max(ratios)),
+            }
+
+    control_comparisons: dict[str, Any] = {}
+    per_record_control_wins: dict[str, int] = {}
+    for endpoint in ENDPOINTS:
+        control_mean = {s: summaries[s][endpoint]["recording_balanced_mean_brier"] for s in CONTROLS}
+        best = min(control_mean, key=lambda s: (control_mean[s], s))
+        real_mean = summaries["REAL"][endpoint]["recording_balanced_mean_brier"]
+        real_record_wins = 0
+        for rid in ids:
+            rb = outer[rid]["endpoints"][endpoint]["sources"]["REAL"]["metric"]["brier"]
+            cb = min(outer[rid]["endpoints"][endpoint]["sources"][s]["metric"]["brier"] for s in CONTROLS)
+            if rb < cb:
+                real_record_wins += 1
+        per_record_control_wins[endpoint] = real_record_wins
+        control_comparisons[endpoint] = {
+            "best_control_source": best,
+            "control_mean_brier": control_mean,
+            "best_control_mean_brier": control_mean[best],
+            "real_mean_brier": real_mean,
+            "real_to_best_control_ratio": real_mean / max(control_mean[best], EPS),
+            "real_recordings_beating_per_record_best_control": real_record_wins,
+        }
+
+    support_all = all(outer[rid]["endpoints"][ep]["support_ok"] for rid in ids for ep in ENDPOINTS)
+    all_finite = all(
+        outer[rid]["endpoints"][ep]["sources"]["REAL"]["metric"]["finite"]
+        and outer[rid]["endpoints"][ep]["sources"]["REAL"]["metric"]["probability_min"] >= 0.01 - 1e-15
+        and outer[rid]["endpoints"][ep]["sources"]["REAL"]["metric"]["probability_max"] <= 0.99 + 1e-15
+        for rid in ids for ep in ENDPOINTS
+    )
+    inner_safe = all(
+        outer[rid]["endpoints"][ep]["sources"][s]["selection_receipt"]["inner_max_model_to_B1"] <= INNER_SAFETY + 1e-15
+        for rid in ids for ep in ENDPOINTS for s in SOURCES
+    )
+    real = summaries["REAL"]
+    cc = control_comparisons
+    max_real = max(real[ep]["maximum_outer_model_to_B1_ratio"] for ep in ENDPOINTS)
+    checks = {
+        "all_real_probabilities_finite_and_clipped": all_finite,
+        "all_records_all_endpoints_event_support": support_all,
+        "primary_real_to_B1_at_most_0_95": real[PRIMARY]["recording_balanced_mean_model_to_B1_ratio"] <= 0.95,
+        "primary_real_to_best_control_at_most_0_98": cc[PRIMARY]["real_to_best_control_ratio"] <= 0.98,
+        "primary_at_least_three_of_four_beats_B1": real[PRIMARY]["recordings_model_beats_B1"] >= 3,
+        "primary_at_least_three_of_four_beats_per_record_best_control": cc[PRIMARY]["real_recordings_beating_per_record_best_control"] >= 3,
+        "secondary_real_to_B1_at_most_0_97": real[SECONDARY]["recording_balanced_mean_model_to_B1_ratio"] <= 0.97,
+        "secondary_real_to_best_control_at_most_0_99": cc[SECONDARY]["real_to_best_control_ratio"] <= 0.99,
+        "secondary_at_least_three_of_four_beats_B1": real[SECONDARY]["recordings_model_beats_B1"] >= 3,
+        "short_real_to_B1_at_most_0_98": real[SHORT]["recording_balanced_mean_model_to_B1_ratio"] <= 0.98,
+        "no_real_outer_any_endpoint_above_1_10": max_real <= 1.10,
+        "all_selected_configs_inner_safety_pass": inner_safe,
+    }
+    passed = int(sum(checks.values()))
+    if not support_all:
+        verdict = "INSUFFICIENT_EVENT_SUPPORT"
+    elif all(checks.values()):
+        verdict = "DISCRETE_TRANSITION_NEURAL_SPECIFICITY_TRAINING_PASS"
+    elif real[PRIMARY]["recording_balanced_mean_model_to_B1_ratio"] <= 0.95 and cc[PRIMARY]["real_to_best_control_ratio"] > 0.98:
+        verdict = "NON_SPECIFIC_TRANSITION_SIGNAL"
+    else:
+        verdict = "NO_DISCRETE_NEURAL_SPECIFICITY"
+    result = {
+        "schema": "bio-001-s39-discrete-transition-specificity-result-v1",
+        "project_code": "BIO-001",
+        "preregistration_commit": PREREG_COMMIT,
+        "status": "TRAINING_PASS" if all(checks.values()) else "TRAINING_FAIL",
+        "verdict": verdict,
+        "passed_checks": passed,
+        "total_checks": len(checks),
+        "checks": checks,
+        "endpoints": ENDPOINTS,
+        "primary_endpoint": PRIMARY,
+        "secondary_endpoint": SECONDARY,
+        "summaries": summaries,
+        "control_comparisons": control_comparisons,
+        "maximum_real_outer_any_endpoint_model_to_B1_ratio": max_real,
+        "outer": outer,
+        "record_receipts": receipts,
+        "development_evaluation_executed": False,
+        "development_source_accessed_by_this_run": False,
+        "AML32_chip_requested": False,
+        "AML32_chip_listed": False,
+        "AML32_chip_downloaded": False,
+        "AML32_chip_opened": False,
+        "CeRSI_v2_delta": 0.0,
+    }
+    result_path = output / "s39_training_result.json"
+    write_json(result_path, result)
+    receipt = {
+        "schema": "bio-001-s39-run-receipt-v1",
+        "status": result["status"],
+        "verdict": verdict,
+        "result_sha256": sha256(result_path),
+        "strict_json": True,
+        "development_evaluation_executed": False,
+        "AML32_chip_opened": False,
+        "CeRSI_v2_delta": 0.0,
+    }
+    write_json(output / "s39_run_receipt.json", receipt)
+    print(json.dumps(receipt, indent=2, sort_keys=True))
+    return result
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--training-root", type=Path, required=True)
+    ap.add_argument("--output", type=Path, required=True)
+    args = ap.parse_args()
+    run(args.training_root, args.output)
+
+
+if __name__ == "__main__":
+    main()
