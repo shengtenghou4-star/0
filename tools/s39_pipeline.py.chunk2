@@ -1,0 +1,214 @@
+    scored: list[bool] = []
+    fmap = {int(x): i for i, x in enumerate(rec.frames)}
+    for f_raw in rec.frames:
+        f = int(f_raw)
+        reveal_f = f + horizon + PERSIST - 1
+        if reveal_f not in fmap:
+            continue
+        b = behavior_features(rec, bs, f)
+        if b is None:
+            continue
+        if scores is not None:
+            assert family in FAMILIES and k in KS
+            n = neural_features(rec, scores, f, family, int(k))
+            if n is None:
+                continue
+            feat = np.concatenate([b, n])
+        else:
+            feat = b
+        current.append(f)
+        reveal.append(reveal_f)
+        labels.append(event_label(bs, f, kind, horizon))
+        rows.append(feat)
+        warm.append(reveal_f <= rec.warmup_boundary)
+        scored.append(f >= rec.warmup_boundary + EMBARGO)
+    if not rows:
+        raise RuntimeError(f"no events {rec.record_id} {endpoint}")
+    return EventSet(
+        np.asarray(current, dtype=int),
+        np.asarray(reveal, dtype=int),
+        np.vstack(rows),
+        np.asarray(labels, dtype=float),
+        np.asarray(warm, dtype=bool),
+        np.asarray(scored, dtype=bool),
+    )
+
+
+class EWScaler:
+    def __init__(self, Xwarm: np.ndarray, lam: float = 0.999):
+        self.mean = np.mean(Xwarm, axis=0)
+        self.var = np.var(Xwarm, axis=0)
+        self.var[self.var < EPS] = 1.0
+        self.lam = lam
+
+    def transform(self, x: np.ndarray) -> np.ndarray:
+        return (x - self.mean) / np.sqrt(np.maximum(self.var, EPS))
+
+    def update(self, x: np.ndarray) -> None:
+        delta = x - self.mean
+        self.mean = self.lam * self.mean + (1.0 - self.lam) * x
+        self.var = self.lam * self.var + (1.0 - self.lam) * np.square(delta)
+
+
+class RLS:
+    def __init__(self, Xwarm: np.ndarray, ywarm: np.ndarray, alpha: float):
+        Xaug = np.column_stack([Xwarm, np.ones(Xwarm.shape[0])])
+        prior = np.full(Xaug.shape[1], alpha)
+        prior[-1] = INTERCEPT_PRIOR
+        A = Xaug.T @ Xaug + np.diag(prior)
+        self.P = np.linalg.inv(A)
+        self.beta = self.P @ Xaug.T @ ywarm
+
+    def predict(self, x: np.ndarray) -> float:
+        return float(np.concatenate([x, np.array([1.0])]) @ self.beta)
+
+    def update(self, x: np.ndarray, y: float) -> None:
+        xa = np.concatenate([x, np.array([1.0])])
+        Px = self.P @ xa
+        gain = Px / (1.0 + float(xa @ Px))
+        err = float(y - xa @ self.beta)
+        self.beta += gain * err
+        self.P -= np.outer(gain, Px)
+
+
+@dataclass
+class ProbabilityStream:
+    current_frames: np.ndarray
+    reveal_frames: np.ndarray
+    y: np.ndarray
+    p: np.ndarray
+
+
+def prequential(events: EventSet, alpha: float) -> ProbabilityStream:
+    warm_idx = np.flatnonzero(events.warmup_mask)
+    scored_idx = np.flatnonzero(events.scored_mask)
+    if warm_idx.size < 10 or scored_idx.size < 10:
+        raise RuntimeError(f"insufficient warm/scored events {warm_idx.size}/{scored_idx.size}")
+    scaler = EWScaler(events.X[warm_idx])
+    Xw = np.vstack([scaler.transform(x) for x in events.X[warm_idx]])
+    model = RLS(Xw, events.y[warm_idx], alpha)
+    pending: list[tuple[int, np.ndarray, float]] = []
+    probs: list[float] = []
+    current: list[int] = []
+    reveal: list[int] = []
+    ys: list[float] = []
+    for idx in scored_idx:
+        f = int(events.current_frames[idx])
+        matured = [row for row in pending if row[0] <= f]
+        pending = [row for row in pending if row[0] > f]
+        for _r, x_old, y_old in sorted(matured, key=lambda z: z[0]):
+            model.update(x_old, y_old)
+        xraw = events.X[idx]
+        xz = scaler.transform(xraw)
+        probs.append(float(np.clip(model.predict(xz), 0.01, 0.99)))
+        current.append(f)
+        reveal.append(int(events.reveal_frames[idx]))
+        ys.append(float(events.y[idx]))
+        pending.append((int(events.reveal_frames[idx]), xz.copy(), float(events.y[idx])))
+        scaler.update(xraw)
+    return ProbabilityStream(np.asarray(current), np.asarray(reveal), np.asarray(ys), np.asarray(probs))
+
+
+def assert_aligned(a: ProbabilityStream, b: ProbabilityStream) -> None:
+    if not np.array_equal(a.current_frames, b.current_frames) or not np.array_equal(a.reveal_frames, b.reveal_frames):
+        raise RuntimeError("unaligned event streams")
+    if not np.array_equal(a.y, b.y):
+        raise RuntimeError("unaligned labels")
+
+
+def brier(y: np.ndarray, p: np.ndarray) -> float:
+    return float(np.mean(np.square(p - y)))
+
+
+def logloss(y: np.ndarray, p: np.ndarray) -> float:
+    p2 = np.clip(p, 0.01, 0.99)
+    return float(-np.mean(y * np.log(p2) + (1.0 - y) * np.log(1.0 - p2)))
+
+
+def metric(stream: ProbabilityStream) -> dict[str, Any]:
+    return {
+        "samples": int(stream.y.size),
+        "positives": int(np.sum(stream.y)),
+        "negatives": int(stream.y.size - np.sum(stream.y)),
+        "positive_rate": float(np.mean(stream.y)),
+        "brier": brier(stream.y, stream.p),
+        "logloss": logloss(stream.y, stream.p),
+        "finite": bool(np.all(np.isfinite(stream.p))),
+        "probability_min": float(np.min(stream.p)),
+        "probability_max": float(np.max(stream.p)),
+    }
+
+
+def support_ok(endpoint: str, m: dict[str, Any]) -> bool:
+    min_pos = 3 if endpoint == PRIMARY else 5
+    return m["samples"] >= 50 and m["positives"] >= min_pos and m["negatives"] >= 20
+
+
+def cfg_id(cfg: dict[str, Any]) -> str:
+    if cfg.get("off", False):
+        return "OFF"
+    return f"{cfg['family']}-k{cfg['k']}-c{cfg['lambda_cov']:.3f}-a{cfg['alpha']:.0f}"
+
+
+def cfg_key(cfg: dict[str, Any]) -> tuple[Any, ...]:
+    if cfg.get("off", False):
+        return (1, 99, 99, 99.0, 99.0)
+    return (0, FAMILIES.index(cfg["family"]), int(cfg["k"]), -float(cfg["lambda_cov"]), -float(cfg["alpha"]))
+
+
+def all_neural_configs() -> list[dict[str, Any]]:
+    rows = [
+        {"off": False, "family": family, "k": int(k), "lambda_cov": float(lam), "alpha": float(alpha)}
+        for family, k, lam, alpha in itertools.product(FAMILIES, KS, LAMBDAS, NEURAL_ALPHAS)
+    ]
+    rows.append({"off": True, "family": "P", "k": 2, "lambda_cov": 0.999, "alpha": 100.0})
+    return rows
+
+
+def run(training_root: Path, output: Path) -> dict[str, Any]:
+    records = load_records(training_root)
+    rmap = {r.record_id: r for r in records}
+    ids = sorted(rmap)
+    bstates = {rid: derive_behavior_state(rmap[rid]) for rid in ids}
+
+    transformed: dict[tuple[str, str], RecordBase] = {}
+    transform_receipts: dict[str, Any] = {rid: {} for rid in ids}
+    score_cache: dict[tuple[str, str, float], NeuralScores] = {}
+    for rid in ids:
+        for source in SOURCES:
+            rec2, receipt = transform_neural(rmap[rid], source)
+            transformed[(rid, source)] = rec2
+            transform_receipts[rid][source] = receipt
+            for lam in LAMBDAS:
+                score_cache[(rid, source, lam)] = compute_online_scores(rec2, lam)
+
+    behavior_events: dict[tuple[str, str], EventSet] = {}
+    behavior_stream_cache: dict[tuple[str, str, float], ProbabilityStream] = {}
+    behavior_metric_cache: dict[tuple[str, str, float], dict[str, Any]] = {}
+    receipts: dict[str, Any] = {}
+    for rid in ids:
+        bs = bstates[rid]
+        receipts[rid] = {
+            "selected_neurons": rmap[rid].selected_neurons,
+            "usable_frames": int(rmap[rid].frames.size),
+            "warmup_boundary": rmap[rid].warmup_boundary,
+            "movement_threshold": bs.movement_threshold,
+            "turn_threshold": bs.turn_threshold,
+            "stable_transition_onsets": int(len(bs.transition_onsets)),
+            "controls": transform_receipts[rid],
+            "basis_updates": {
+                source: {f"{lam:.3f}": score_cache[(rid, source, lam)].basis_updates for lam in LAMBDAS}
+                for source in SOURCES
+            },
+        }
+        for endpoint in ENDPOINTS:
+            ev = build_events(rmap[rid], bs, endpoint)
+            behavior_events[(rid, endpoint)] = ev
+            receipts[rid].setdefault("event_counts", {})[endpoint] = {
+                "warm_samples": int(np.sum(ev.warmup_mask)),
+                "warm_positives": int(np.sum(ev.y[ev.warmup_mask])),
+                "scored_samples": int(np.sum(ev.scored_mask)),
+                "scored_positives": int(np.sum(ev.y[ev.scored_mask])),
+            }
+            for alpha in BASE_ALPHAS:
+                s = prequential(ev, alpha)
