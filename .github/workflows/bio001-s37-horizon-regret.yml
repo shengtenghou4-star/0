@@ -30,7 +30,7 @@ jobs:
           set -euo pipefail
           base64 -d tools/s37_pipeline.py.gz.b64 | gzip -d > tools/s37_pipeline.py
           test "$(sha256sum tools/s37_pipeline.py | awk '{print $1}')" = "0c5132213b58d0ec3ab241cb4bc020f35c69284f1d9d3fcc7f07fb1354ed0e5d"
-          test "$(sha256sum tools/s37_audit.py | awk '{print $1}')" = "177abfe4011777447160560ddb83c7274d7450fd56e3453507009a7e96ebc326"
+          test "$(sha256sum tools/s37_audit.py | awk '{print $1}')" = "9845a44bee3ea1e83043303a19058e3b8cad60c9b5818db8e7259c1e38668e1c"
           python -m py_compile tools/s37_pipeline.py tools/s37_audit.py tools/bio001_s37_acquire.py
 
       - name: Acquire and extract verified training archive only
