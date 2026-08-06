@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+ROOT = Path('.')
+PIPELINE_SHA256 = '1b0219df40fd6603cac0f69befe506287737746a9ebc684c01b1cb7711eccd6c'
+DATA_SHA256 = '144126ee9a49d311c3393deea434e1a0963d55de35318e25d98d48f9c175250a'
+SOURCES = ('REAL', 'TIME_REVERSED', 'PHASE_SCRAMBLED', 'CHANNEL_BLOCK_PERMUTED')
+CONTROLS = SOURCES[1:]
+ENDPOINTS = ('ANY_TRANSITION_10', 'ANY_TRANSITION_20', 'TURN_INITIATION_20')
+PRIMARY = 'TURN_INITIATION_20'
+SECONDARY = 'ANY_TRANSITION_20'
+SHORT = 'ANY_TRANSITION_10'
+EPS = 1e-12
+
+
+def sha(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open('rb') as f:
+        for block in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+p1 = json.loads((ROOT / 's39_output_primary/s39_training_result.json').read_text())
+p2 = json.loads((ROOT / 's39_output_rerun/s39_training_result.json').read_text())
+r1 = json.loads((ROOT / 's39_output_primary/s39_run_receipt.json').read_text())
+r2 = json.loads((ROOT / 's39_output_rerun/s39_run_receipt.json').read_text())
+source = json.loads((ROOT / 's39_artifacts/source_manifest.json').read_text())
+nonaccess = json.loads((ROOT / 's39_artifacts/holdout_nonaccess_receipt.json').read_text())
+
+assert sha(ROOT / 'tools/s39_pipeline.py') == PIPELINE_SHA256
+assert source['target']['bytes'] == 348_444_164
+assert source['target']['sha256'] == DATA_SHA256
+assert source['development_url_present'] is False
+assert source['sealed_holdout_url_present'] is False
+assert all(nonaccess[k] is False for k in (
+    'sealed_holdout_requested', 'sealed_holdout_listed', 'sealed_holdout_downloaded',
+    'sealed_holdout_opened', 'development_source_accessed'
+))
+assert sha(ROOT / 's39_output_primary/s39_training_result.json') == sha(ROOT / 's39_output_rerun/s39_training_result.json')
+assert sha(ROOT / 's39_output_primary/s39_run_receipt.json') == sha(ROOT / 's39_output_rerun/s39_run_receipt.json')
+assert p1 == p2 and r1 == r2
+assert set(p1['summaries']) == set(SOURCES)
+assert set(p1['endpoints']) == set(ENDPOINTS)
+
+# Independent support and gate arithmetic.
+ids = sorted(p1['outer'])
+support_all = True
+all_finite = True
+inner_safe = True
+for rid in ids:
+    for ep in ENDPOINTS:
+        row = p1['outer'][rid]['endpoints'][ep]
+        bm = row['behavior_metric']
+        min_pos = 3 if ep == PRIMARY else 5
+        ok = bm['samples'] >= 50 and bm['positives'] >= min_pos and bm['negatives'] >= 20
+        assert ok == row['support_ok']
+        support_all = support_all and ok
+        real_m = row['sources']['REAL']['metric']
+        all_finite = all_finite and real_m['finite'] and real_m['probability_min'] >= 0.01 - 1e-15 and real_m['probability_max'] <= 0.99 + 1e-15
+        for src in SOURCES:
+            sel = row['sources'][src]['selection_receipt']
+            inner_safe = inner_safe and sel['inner_max_model_to_B1'] <= sel['inner_safety_ceiling'] + 1e-15
+            ratio = row['sources'][src]['metric']['brier'] / max(bm['brier'], EPS)
+            assert abs(ratio - row['sources'][src]['model_to_B1_brier_ratio']) <= 1e-15
+
+summary = p1['summaries']['REAL']
+cc = p1['control_comparisons']
+for ep in ENDPOINTS:
+    means = cc[ep]['control_mean_brier']
+    best = min(means, key=lambda s: (means[s], s))
+    assert best == cc[ep]['best_control_source']
+    assert best in CONTROLS
+    assert abs(cc[ep]['real_to_best_control_ratio'] - cc[ep]['real_mean_brier'] / means[best]) <= 1e-15
+    record_wins = 0
+    for rid in ids:
+        rb = p1['outer'][rid]['endpoints'][ep]['sources']['REAL']['metric']['brier']
+        cb = min(p1['outer'][rid]['endpoints'][ep]['sources'][s]['metric']['brier'] for s in CONTROLS)
+        record_wins += int(rb < cb)
+    assert record_wins == cc[ep]['real_recordings_beating_per_record_best_control']
+
+max_real = max(summary[ep]['maximum_outer_model_to_B1_ratio'] for ep in ENDPOINTS)
+recalc = {
+    'all_real_probabilities_finite_and_clipped': all_finite,
+    'all_records_all_endpoints_event_support': support_all,
+    'primary_real_to_B1_at_most_0_95': summary[PRIMARY]['recording_balanced_mean_model_to_B1_ratio'] <= 0.95,
+    'primary_real_to_best_control_at_most_0_98': cc[PRIMARY]['real_to_best_control_ratio'] <= 0.98,
+    'primary_at_least_three_of_four_beats_B1': summary[PRIMARY]['recordings_model_beats_B1'] >= 3,
+    'primary_at_least_three_of_four_beats_per_record_best_control': cc[PRIMARY]['real_recordings_beating_per_record_best_control'] >= 3,
+    'secondary_real_to_B1_at_most_0_97': summary[SECONDARY]['recording_balanced_mean_model_to_B1_ratio'] <= 0.97,
+    'secondary_real_to_best_control_at_most_0_99': cc[SECONDARY]['real_to_best_control_ratio'] <= 0.99,
+    'secondary_at_least_three_of_four_beats_B1': summary[SECONDARY]['recordings_model_beats_B1'] >= 3,
+    'short_real_to_B1_at_most_0_98': summary[SHORT]['recording_balanced_mean_model_to_B1_ratio'] <= 0.98,
+    'no_real_outer_any_endpoint_above_1_10': max_real <= 1.10,
+    'all_selected_configs_inner_safety_pass': inner_safe,
+}
+assert recalc == p1['checks']
+assert sum(recalc.values()) == p1['passed_checks']
+assert all(recalc.values()) == (p1['status'] == 'TRAINING_PASS')
+assert abs(max_real - p1['maximum_real_outer_any_endpoint_model_to_B1_ratio']) <= 1e-15
+
