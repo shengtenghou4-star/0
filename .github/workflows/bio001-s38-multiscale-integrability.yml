@@ -28,7 +28,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base64 -d tools/s38_pipeline.py.gz.b64 | gzip -d > tools/s38_pipeline.py
+          test "$(sha256sum tools/s38_pipeline.py.gz.b64.part00 | awk '{print $1}')" = "46c9c9c1176b35d96be5321a0a5d3cc4cbab58a7751fb61a4998ee9790aa34fe"
+          test "$(sha256sum tools/s38_pipeline.py.gz.b64.part01 | awk '{print $1}')" = "29b4222e386bad0cb77fe08b2efc545e32c85242eea551e32e8327de7ce83017"
+          test "$(sha256sum tools/s38_pipeline.py.gz.b64.part02 | awk '{print $1}')" = "826e372e6033120301d8a266e19ed2cc8272ffc01c5f95ae7a258ed0f6d9102d"
+          test "$(sha256sum tools/s38_pipeline.py.gz.b64.part03 | awk '{print $1}')" = "8b2fac4995c7930e86f688c8d0a5bfc3f61f3e6f2e60f3f77a92b7da256e4c57"
+          cat tools/s38_pipeline.py.gz.b64.part00 tools/s38_pipeline.py.gz.b64.part01 tools/s38_pipeline.py.gz.b64.part02 tools/s38_pipeline.py.gz.b64.part03 > tools/s38_pipeline.py.gz.b64.joined
+          test "$(sha256sum tools/s38_pipeline.py.gz.b64.joined | awk '{print $1}')" = "6b540745cbe47694651c0c18257c91d692d4431c0b054e99ec73579043a904a3"
+          base64 -d tools/s38_pipeline.py.gz.b64.joined | gzip -d > tools/s38_pipeline.py
           test "$(sha256sum tools/s38_pipeline.py | awk '{print $1}')" = "077150c5846941ee38966f905cad8a1f4a662c9f476bc30e867626a11b754848"
           test "$(sha256sum tools/s38_audit.py | awk '{print $1}')" = "1340d731e4d655e2eae6b47e265a9534763a100111f4f70d3262df9ec8de5db8"
           python -m py_compile tools/s38_pipeline.py tools/s38_audit.py tools/bio001_s38_acquire.py
