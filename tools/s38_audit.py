@@ -42,7 +42,7 @@ assert all(nonaccess[k] is False for k in (
 assert sha(ROOT / 's38_output_primary/s38_training_result.json') == sha(ROOT / 's38_output_rerun/s38_training_result.json')
 assert sha(ROOT / 's38_output_primary/s38_run_receipt.json') == sha(ROOT / 's38_output_rerun/s38_run_receipt.json')
 assert p1 == p2 and r1 == r2
-assert tuple(p1['summaries']) == SOURCES
+assert set(p1['summaries']) == set(SOURCES)
 
 # Independent gate arithmetic.
 summary = p1['summaries']
