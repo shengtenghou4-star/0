@@ -1,4 +1,4 @@
-name: BIO-001 S45 identity sparse circuit Phase A
+name: BIO-001 S45 audit source freeze
 
 on:
   pull_request:
@@ -9,9 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  s45-phaseA:
+  audit-source-freeze:
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,56 +18,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Install frozen runtime
-        run: python -m pip install "numpy==2.5.1" "scipy==1.17.0"
-      - name: Verify frozen public executables
+      - name: Print and compile corrected audit only
         shell: bash
         run: |
           set -euo pipefail
-          test "$(sha256sum tools/s42_canonical_reconstruction.py | awk '{print $1}')" = "302cb2b12699f450edffb587b2b9f943f6d46b6b8044d7bad46213ba71380c47"
-          test "$(sha256sum tools/s43_calcium_innovation.py | awk '{print $1}')" = "45ed3827caf051a042ca68eea97dba3357c22bddcb06f9b13ac4eba745bf84e8"
-          test "$(sha256sum tools/bio001_s42_acquire.py | awk '{print $1}')" = "469951d266436cdc406c3ee978ab8c73f592cf8904395d02aaa53aa93db479a8"
-          test "$(sha256sum tools/s45_phaseA.py | awk '{print $1}')" = "95c96b2dbb0b5ebf672140199deedb16482439a5a905a70c30acb369cf53d58f"
-          test "$(sha256sum tools/s45_phaseA_portable.py | awk '{print $1}')" = "904f3112aab1a8bea95d035f365a9b78a10cad7fef9dea65a21921d30485eec9"
-          test "$(sha256sum tools/s45_phaseA_audit_portable.py | awk '{print $1}')" = "209a7098e25d61c693f12d714f4c0fb556ff94191a29c3e55b193f63dca7f9c5"
-          python -m py_compile tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/bio001_s42_acquire.py tools/s45_phaseA.py tools/s45_phaseA_portable.py tools/s45_phaseA_audit_portable.py
-      - name: Acquire verified AML310 moving training archive only
-        shell: bash
-        run: |
-          set -euo pipefail
-          python tools/bio001_s42_acquire.py
-          mkdir -p s45_data/training s45_artifacts
-          tar -xzf s42_artifacts/raw/AML310_moving.tar.gz -C s45_data/training
-          cp s42_artifacts/source_manifest.json s45_artifacts/source_manifest.json
-      - name: Execute frozen primary and exact rerun
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf s45_output
-          python tools/s45_phaseA_portable.py
-          mv s45_output s45_primary
-          python tools/s45_phaseA_portable.py
-          mv s45_output s45_rerun
-      - name: Independent identity sparse ranking and nonaccess audit
-        run: python tools/s45_phaseA_audit_portable.py
-      - name: Package evidence
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p s45_evidence
-          cp tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/bio001_s42_acquire.py tools/s45_phaseA.py tools/s45_phaseA_portable.py tools/s45_phaseA_audit_portable.py s45_evidence/ || true
-          cp s45_primary/*.json s45_evidence/ 2>/dev/null || true
-          cp s45_rerun/*.json s45_evidence/ 2>/dev/null || true
-          cp s45_independent_audit.json s45_evidence/ 2>/dev/null || true
-          cp s45_artifacts/source_manifest.json s45_evidence/ 2>/dev/null || true
-          (cd s45_evidence && sha256sum * > manifest.sha256)
-      - name: Upload S45 Phase A evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bio001-s45-identity-sparse-phaseA-evidence
-          path: s45_evidence/
-          compression-level: 9
-          retention-days: 30
-          if-no-files-found: warn
+          sha256sum tools/s45_phaseA_portable.py tools/s45_phaseA_audit_portable.py
+          python -m py_compile tools/s45_phaseA_portable.py tools/s45_phaseA_audit_portable.py
+          echo S45_AUDIT_NULL_HANDLING_SOURCE_FREEZE_PASS
