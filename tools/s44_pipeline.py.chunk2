@@ -1,0 +1,83 @@
+
+
+def main()->None:
+    records=load_records(); ids=[r.record_id for r in records]; by_id={r.record_id:r for r in records}; states={r.record_id:derive_behavior_state(r) for r in records}
+    source_receipts={}; feature_bank={}
+    for rec in records:
+        source_receipts[rec.record_id]={}
+        feature_bank[rec.record_id]={}
+        for source in SOURCES:
+            smat,receipt=transform_source(rec,source); source_receipts[rec.record_id][source]=receipt
+            feature_bank[rec.record_id][source]={ro:readout_features(rec,smat,ro) for ro in READOUTS}
+
+    # Precompute behavior baselines and source/readout candidates for each record/endpoint/alpha.
+    baseline={rid:{ep:{a:run_model(by_id[rid],states[rid],ep,None,a) for a in ALPHAS} for ep in ENDPOINTS} for rid in ids}
+    model_bank={}
+    for rid in ids:
+        model_bank[rid]={}
+        for ep in ENDPOINTS:
+            model_bank[rid][ep]={}
+            for source in SOURCES:
+                model_bank[rid][ep][source]={}
+                for ro in READOUTS:
+                    for a in ALPHAS:
+                        model_bank[rid][ep][source][(ro,a)]=run_model(by_id[rid],states[rid],ep,feature_bank[rid][source][ro],a)
+
+    outer={}; selection={}
+    all_inner_safe=True
+    for outer_id in ids:
+        outer[outer_id]={'endpoints':{}}; selection[outer_id]={}
+        inner=[rid for rid in ids if rid!=outer_id]
+        for ep in ENDPOINTS:
+            # Baseline alpha selected on inner records only.
+            base_alpha=min(ALPHAS,key=lambda a:(float(np.mean([baseline[r][ep][a]['brier'] for r in inner])), -a))
+            bouter=baseline[outer_id][ep][base_alpha]
+            row={'behavior_metric':bouter,'behavior_alpha':base_alpha,'support_ok':support_ok(bouter,ep),'sources':{}}
+            selection[outer_id][ep]={}
+            for source in SOURCES:
+                candidates=[{'off':True,'readout':'OFF','alpha':base_alpha,'inner_mean_brier':float(np.mean([baseline[r][ep][base_alpha]['brier'] for r in inner])),
+                             'inner_max_model_to_B1':1.0,'eligible':True}]
+                for ro in READOUTS:
+                    for a in ALPHAS:
+                        ratios=[]; briers=[]
+                        for r in inner:
+                            bm=baseline[r][ep][base_alpha]['brier']; mm=model_bank[r][ep][source][(ro,a)]['brier']
+                            ratios.append(mm/max(bm,EPS)); briers.append(mm)
+                        candidates.append({'off':False,'readout':ro,'alpha':a,'inner_mean_brier':float(np.mean(briers)),
+                                           'inner_max_model_to_B1':float(max(ratios)),'eligible':bool(max(ratios)<=INNER_SAFETY+1e-15)})
+                eligible=[c for c in candidates if c['eligible']]
+                selected=sorted(eligible,key=lambda c:(c['inner_mean_brier'],c['inner_max_model_to_B1'],cfg_key(c)))[0]
+                if selected['off']: metric=bouter
+                else: metric=model_bank[outer_id][ep][source][(selected['readout'],selected['alpha'])]
+                ratio=metric['brier']/max(bouter['brier'],EPS)
+                row['sources'][source]={'selected_config':{'off':selected['off'],'readout':selected['readout'],'alpha':selected['alpha']},
+                    'selection_receipt':{'inner_mean_brier':selected['inner_mean_brier'],'inner_max_model_to_B1':selected['inner_max_model_to_B1'],'inner_safety_ceiling':INNER_SAFETY},
+                    'metric':metric,'model_to_B1_brier_ratio':float(ratio)}
+                selection[outer_id][ep][source]=candidates
+                all_inner_safe=all_inner_safe and selected['inner_max_model_to_B1']<=INNER_SAFETY+1e-15
+            outer[outer_id]['endpoints'][ep]=row
+
+    summaries={}
+    for source in SOURCES:
+        summaries[source]={}
+        for ep in ENDPOINTS:
+            metrics=[outer[r]['endpoints'][ep]['sources'][source]['metric'] for r in ids]
+            ratios=[outer[r]['endpoints'][ep]['sources'][source]['model_to_B1_brier_ratio'] for r in ids]
+            summaries[source][ep]={'recording_balanced_mean_brier':float(np.mean([m['brier'] for m in metrics])),
+                'recording_balanced_mean_model_to_B1_ratio':float(np.mean(ratios)),'recordings_model_beats_B1':int(sum(x<1.0 for x in ratios)),
+                'maximum_outer_model_to_B1_ratio':float(max(ratios)),'recording_count':len(ids)}
+
+    control_comparisons={}
+    for ep in ENDPOINTS:
+        means={s:summaries[s][ep]['recording_balanced_mean_brier'] for s in CONTROLS}; best=min(means,key=lambda s:(means[s],s))
+        real_mean=summaries['REAL'][ep]['recording_balanced_mean_brier']; wins=0
+        for rid in ids:
+            rb=outer[rid]['endpoints'][ep]['sources']['REAL']['metric']['brier']
+            cb=min(outer[rid]['endpoints'][ep]['sources'][s]['metric']['brier'] for s in CONTROLS)
+            wins+=int(rb<cb)
+        control_comparisons[ep]={'control_mean_brier':means,'best_control_source':best,'best_control_mean_brier':means[best],
+            'real_mean_brier':real_mean,'real_to_best_control_ratio':float(real_mean/max(means[best],EPS)),
+            'real_recordings_beating_per_record_best_control':wins}
+
+    support_all=all(outer[r]['endpoints'][ep]['support_ok'] for r in ids for ep in ENDPOINTS)
+    all_finite=all(outer[r]['endpoints'][ep]['sources']['REAL']['metric']['finite'] and outer[r]['endpoints'][ep]['sources']['REAL']['metric']['probability_min']>=0.01-1e-15 and outer[r]['endpoints'][ep]['sources']['REAL']['metric']['probability_max']<=0.99+1e-15 for r in ids for ep in ENDPOINTS)
