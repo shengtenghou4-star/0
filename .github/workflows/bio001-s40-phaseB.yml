@@ -29,7 +29,7 @@ jobs:
         run: |
           set -euo pipefail
           sha256sum tools/s40_phaseB.py tools/s40_audit.py
-          test "$(sha256sum tools/s40_phaseB.py | awk '{print $1}')" = "11344bf0fafef5108188980d342ebe8a05bf129fcfff69511369f30227e5ea63"
+          test "$(sha256sum tools/s40_phaseB.py | awk '{print $1}')" = "02fe812e3e560054f20afbfcb48cfdf8b8972d23255a1d7171fceebdd5b16003"
           test "$(sha256sum tools/s40_audit.py | awk '{print $1}')" = "dc9c5ad6a323c55fd4702e547240d80bd3b33312893eb7767054dd8feb4e1dbf"
           python -m py_compile tools/bio001_s40_acquire.py tools/s40_identity_inventory.py tools/s40_phaseB.py tools/s40_audit.py
 
