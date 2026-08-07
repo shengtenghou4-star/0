@@ -1,0 +1,84 @@
+name: BIO-001 S44 canonical innovation behavioral specificity
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  s44-specificity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install frozen runtime
+        run: python -m pip install "numpy==2.5.1" "scipy==1.17.0"
+
+      - name: Assemble and verify frozen executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum tools/s44_pipeline.py.chunk0 | awk '{print $1}')" = "37dc08b7b52b0c882322ac11dc29ad7dd5ef96e108640140890c5351f2722d24"
+          test "$(sha256sum tools/s44_pipeline.py.chunk1 | awk '{print $1}')" = "797391ebf2fa9f45e5bc6093dcfa19016a2f21d68fe51b45d708968fb5d6fc08"
+          test "$(sha256sum tools/s44_pipeline.py.chunk2 | awk '{print $1}')" = "c20154d7c693b127f4e65589179b356b30a35d89b5902b7f039a1fb99617264a"
+          test "$(sha256sum tools/s44_pipeline.py.chunk3 | awk '{print $1}')" = "b6430971c5af8bdf15ea7361205219394219a11f5aa4a80b17469248f4564812"
+          cat tools/s44_pipeline.py.chunk0 tools/s44_pipeline.py.chunk1 tools/s44_pipeline.py.chunk2 tools/s44_pipeline.py.chunk3 > tools/s44_pipeline.py
+          test "$(sha256sum tools/s44_pipeline.py | awk '{print $1}')" = "f8d11b16f911fe8982c9e8af2e07240eafcf536c47fb8e7fcd66b545c6a8bc34"
+          test "$(sha256sum tools/s44_audit.py | awk '{print $1}')" = "69e0415305103b331a091c38e3b05ec119fd1a692f9b1ac3117a4d73b4e194b8"
+          python -m py_compile tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/s44_pipeline.py tools/s44_audit.py tools/bio001_s42_acquire.py
+          sha256sum tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/s44_pipeline.py tools/s44_audit.py tools/bio001_s42_acquire.py
+
+      - name: Acquire verified AML310 moving training archive only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/bio001_s42_acquire.py
+          mkdir -p s44_data/training s44_artifacts
+          tar -xzf s42_artifacts/raw/AML310_moving.tar.gz -C s44_data/training
+          cp s42_artifacts/source_manifest.json s44_artifacts/source_manifest.json
+
+      - name: Execute frozen primary and exact rerun
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf s44_output
+          python tools/s44_pipeline.py
+          mv s44_output s44_primary
+          python tools/s44_pipeline.py
+          mv s44_output s44_rerun
+
+      - name: Independent specificity, source, rerun and nonaccess audit
+        run: python tools/s44_audit.py
+
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p s44_evidence
+          cp tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/s44_pipeline.py tools/s44_audit.py tools/bio001_s42_acquire.py s44_evidence/ || true
+          cp s44_primary/*.json s44_evidence/ 2>/dev/null || true
+          cp s44_rerun/*.json s44_evidence/ 2>/dev/null || true
+          cp s44_independent_audit.json s44_evidence/ 2>/dev/null || true
+          cp s44_artifacts/source_manifest.json s44_evidence/ 2>/dev/null || true
+          (cd s44_evidence && sha256sum * > manifest.sha256)
+
+      - name: Upload S44 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s44-canonical-behavioral-specificity-evidence
+          path: s44_evidence/
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: warn
