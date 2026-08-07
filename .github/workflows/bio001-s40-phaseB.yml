@@ -1,0 +1,90 @@
+name: BIO-001 S40 within-record neural innovation
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  s40-phaseB:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install frozen runtime
+        run: python -m pip install "numpy==2.5.1" "scipy==1.17.0"
+
+      - name: Verify and compile frozen S40 executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum tools/s40_phaseB.py tools/s40_audit.py
+          test "$(sha256sum tools/s40_phaseB.py | awk '{print $1}')" = "11344bf0fafef5108188980d342ebe8a05bf129fcfff69511369f30227e5ea63"
+          test "$(sha256sum tools/s40_audit.py | awk '{print $1}')" = "dc9c5ad6a323c55fd4702e547240d80bd3b33312893eb7767054dd8feb4e1dbf"
+          python -m py_compile tools/bio001_s40_acquire.py tools/s40_identity_inventory.py tools/s40_phaseB.py tools/s40_audit.py
+
+      - name: Acquire hash-verified AML310 moving training archive only
+        run: |
+          set -euo pipefail
+          python tools/bio001_s40_acquire.py
+          mkdir -p s40_data/training
+          tar -xzf s40_artifacts/raw/AML310_moving.tar.gz -C s40_data/training
+
+      - name: Reproduce structural identity gate before numeric audit
+        run: |
+          set -euo pipefail
+          python tools/s40_identity_inventory.py
+          python - <<'PY'
+          import json
+          q=json.load(open('s40_phaseA/s40_phaseA_identity_inventory.json'))
+          assert q['identity_class']=='I1_WITHIN_RECORD_STABLE_IDENTITY_ONLY'
+          assert q['phaseB_route']=='WITHIN_RECORD_INNOVATION_ONLY'
+          assert q['cross_record_biological_identity_claim_allowed'] is False
+          print({'identity_gate':'PASS','identity_class':q['identity_class']})
+          PY
+
+      - name: Execute frozen primary and exact rerun
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf s40_phaseB
+          python tools/s40_phaseB.py
+          mv s40_phaseB s40_phaseB_primary
+          python tools/s40_phaseB.py
+          mv s40_phaseB s40_phaseB_rerun
+
+      - name: Independent gate, identity and nonaccess audit
+        run: python tools/s40_audit.py
+
+      - name: Package evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p s40_evidence
+          cp tools/s40_phaseB.py tools/s40_audit.py tools/s40_identity_inventory.py tools/bio001_s40_acquire.py s40_evidence/
+          cp s40_phaseA/s40_phaseA_identity_inventory.json s40_evidence/
+          cp s40_phaseB_primary/*.json s40_evidence/
+          cp s40_phaseB_rerun/*.json s40_evidence/
+          cp s40_independent_audit.json s40_evidence/
+          cp s40_artifacts/source_manifest.json s40_evidence/
+          (cd s40_evidence && sha256sum * > manifest.sha256)
+
+      - name: Upload S40 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s40-identity-innovation-evidence
+          path: s40_evidence/
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: warn
