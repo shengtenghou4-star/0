@@ -1,0 +1,33 @@
+    primary_ratio=summaries['REAL'][PRIMARY]['recording_balanced_mean_model_to_B1_ratio']; secondary_ratio=summaries['REAL'][SECONDARY]['recording_balanced_mean_model_to_B1_ratio']; short_ratio=summaries['REAL'][SHORT]['recording_balanced_mean_model_to_B1_ratio']
+    max_real=max(summaries['REAL'][ep]['maximum_outer_model_to_B1_ratio'] for ep in ENDPOINTS)
+    checks={
+        'all_real_probabilities_finite_and_clipped':all_finite,
+        'all_records_all_endpoints_event_support':support_all,
+        'primary_real_to_B1_at_most_0_95':primary_ratio<=0.95,
+        'primary_real_to_best_control_at_most_0_98':control_comparisons[PRIMARY]['real_to_best_control_ratio']<=0.98,
+        'primary_at_least_three_of_four_beats_B1':summaries['REAL'][PRIMARY]['recordings_model_beats_B1']>=3,
+        'primary_at_least_three_of_four_beats_per_record_best_control':control_comparisons[PRIMARY]['real_recordings_beating_per_record_best_control']>=3,
+        'secondary_real_to_B1_at_most_0_97':secondary_ratio<=0.97,
+        'secondary_real_to_best_control_at_most_0_99':control_comparisons[SECONDARY]['real_to_best_control_ratio']<=0.99,
+        'secondary_at_least_three_of_four_beats_B1':summaries['REAL'][SECONDARY]['recordings_model_beats_B1']>=3,
+        'short_real_to_B1_at_most_0_98':short_ratio<=0.98,
+        'no_real_outer_any_endpoint_above_1_10':max_real<=1.10,
+        'all_selected_configs_inner_safety_pass':all_inner_safe,
+    }
+    passed=sum(checks.values())
+    if not support_all: verdict='INSUFFICIENT_EVENT_SUPPORT'; status='TRAINING_FAIL'
+    elif passed==12: verdict='CANONICAL_INNOVATION_BEHAVIORAL_SPECIFICITY_TRAINING_PASS'; status='TRAINING_PASS'
+    elif primary_ratio<=0.95 and control_comparisons[PRIMARY]['real_to_best_control_ratio']>0.98: verdict='NON_SPECIFIC_CANONICAL_INNOVATION_SIGNAL'; status='TRAINING_FAIL'
+    else: verdict='NO_CANONICAL_INNOVATION_BEHAVIORAL_SPECIFICITY'; status='TRAINING_FAIL'
+    event_counts={rid:{ep:{'scored_samples':outer[rid]['endpoints'][ep]['behavior_metric']['samples'],'scored_positives':outer[rid]['endpoints'][ep]['behavior_metric']['positives']} for ep in ENDPOINTS} for rid in ids}
+    result={'schema':'bio-001-s44-result-v1','status':status,'verdict':verdict,'passed_checks':passed,'total_checks':12,'checks':checks,
+        'summaries':summaries,'control_comparisons':control_comparisons,'outer':outer,'event_counts':event_counts,'source_receipts':source_receipts,
+        'max_real_ratio':float(max_real),'S42_canonical_generator_integrity':'PASS','S43_calcium_generator_integrity':'PASS',
+        'CeRSI_v2_delta':0.0,'development_evaluation_executed':False,'AML32_chip_opened':False}
+    write_json(OUT/'s44_training_result.json',result)
+    receipt={'schema':'bio-001-s44-run-receipt-v1','status':status,'verdict':verdict,'passed_checks':passed,'total_checks':12,
+        'CeRSI_v2_delta':0.0,'development_evaluation_executed':False,'AML32_chip_opened':False}
+    write_json(OUT/'s44_run_receipt.json',receipt)
+    print(json.dumps(receipt,sort_keys=True))
+
+if __name__=='__main__': main()
