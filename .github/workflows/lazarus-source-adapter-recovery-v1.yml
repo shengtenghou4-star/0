@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - case/lazarus-source-adapter-recovery-v1
+  pull_request:
+    branches:
+      - case/lazarus-orth-residual-public-v1
 
 permissions:
   contents: read
