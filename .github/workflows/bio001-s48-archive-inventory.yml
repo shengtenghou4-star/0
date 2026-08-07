@@ -1,0 +1,42 @@
+name: BIO-001 S48 Dryad archive inventory
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  archive-inventory:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Verify frozen inventory executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum tools/s48_archive_inventory.py | awk '{print $1}')" = "63230a4370f7efc3e6f6f8738f0d87dba22cb53431627cb73a03c80cb9596e0c"
+          python -m py_compile tools/s48_archive_inventory.py
+      - name: Acquire Dryad archive without extracting numeric members
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p s48_target
+          curl -L --fail --retry 3 --retry-all-errors --connect-timeout 30 -A 'Mozilla/5.0' -o s48_target/dryad.zip 'https://datadryad.org/downloads/file_stream/2876840'
+          python tools/s48_archive_inventory.py s48_target/dryad.zip s48_target/archive_manifest.json
+      - name: Upload archive metadata only
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s48-dryad-archive-inventory
+          path: |
+            s48_target/archive_manifest.json
+            s48_target/archive_manifest.json.names.txt
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: error
