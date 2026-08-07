@@ -21,6 +21,7 @@ jobs:
       - run: python hou_lens_p494/p494_resolve_h24_catalogue.py
       - run: python hou_lens_p494/p494_resolve_r_tile_quality.py
       - run: python hou_lens_p494/p494_h24_control_feasibility.py
+      - run: python hou_lens_p494/p494_known_lens_clearance.py
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -29,4 +30,5 @@ jobs:
             p494_tap_artifact/
             p494_tile_quality_artifact/
             p494_h24_control_feasibility_artifact/
+            p494_known_lens_clearance_artifact/
           if-no-files-found: error
