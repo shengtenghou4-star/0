@@ -1,4 +1,4 @@
-name: BIO-001 S47 interaction source freeze
+name: BIO-001 S47 behavior-free sparse interaction audit
 
 on:
   pull_request:
@@ -9,8 +9,9 @@ permissions:
   contents: read
 
 jobs:
-  source-freeze:
+  s47-interaction:
     runs-on: ubuntu-24.04
+    timeout-minutes: 300
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,12 +19,55 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Install compile runtime
+      - name: Install frozen runtime
         run: python -m pip install "numpy==2.5.1" "scipy==1.17.0"
-      - name: Print and compile public executable bytes only
+      - name: Verify frozen public executables
         shell: bash
         run: |
           set -euo pipefail
-          sha256sum tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/s47_interaction_audit.py tools/s47_audit.py tools/bio001_s42_acquire.py
+          test "$(sha256sum tools/s42_canonical_reconstruction.py | awk '{print $1}')" = "302cb2b12699f450edffb587b2b9f943f6d46b6b8044d7bad46213ba71380c47"
+          test "$(sha256sum tools/s43_calcium_innovation.py | awk '{print $1}')" = "45ed3827caf051a042ca68eea97dba3357c22bddcb06f9b13ac4eba745bf84e8"
+          test "$(sha256sum tools/s47_interaction_audit.py | awk '{print $1}')" = "30ef510cd3b0335461863ec80d338d2a610f1094edd1ad0ec1e7259c72cc3d94"
+          test "$(sha256sum tools/s47_audit.py | awk '{print $1}')" = "3bd81fff8fa81620193775f13de2a91b1c8c66b1917cb12fbd72652b34be87c2"
+          test "$(sha256sum tools/bio001_s42_acquire.py | awk '{print $1}')" = "469951d266436cdc406c3ee978ab8c73f592cf8904395d02aaa53aa93db479a8"
           python -m py_compile tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/s47_interaction_audit.py tools/s47_audit.py tools/bio001_s42_acquire.py
-          echo S47_SOURCE_FREEZE_PASS
+      - name: Acquire verified AML310 moving training archive only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/bio001_s42_acquire.py
+          mkdir -p s47_data/training s47_artifacts
+          tar -xzf s42_artifacts/raw/AML310_moving.tar.gz -C s47_data/training
+          cp s42_artifacts/source_manifest.json s47_artifacts/source_manifest.json
+      - name: Execute frozen primary and exact rerun
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf s47_output
+          python tools/s47_interaction_audit.py
+          mv s47_output s47_primary
+          python tools/s47_interaction_audit.py
+          mv s47_output s47_rerun
+      - name: Independent pair arithmetic ranking and nonaccess audit
+        run: python tools/s47_audit.py
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p s47_evidence
+          cp tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/s47_interaction_audit.py tools/s47_audit.py tools/bio001_s42_acquire.py s47_evidence/ || true
+          cp s47_primary/*.json s47_evidence/ 2>/dev/null || true
+          cp s47_rerun/*.json s47_evidence/ 2>/dev/null || true
+          cp s47_independent_audit.json s47_evidence/ 2>/dev/null || true
+          cp s47_artifacts/source_manifest.json s47_evidence/ 2>/dev/null || true
+          (cd s47_evidence && sha256sum * > manifest.sha256)
+      - name: Upload S47 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s47-behavior-free-interaction-evidence
+          path: s47_evidence/
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: warn
