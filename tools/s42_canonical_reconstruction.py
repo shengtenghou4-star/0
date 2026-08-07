@@ -30,7 +30,6 @@ def write_json(path: Path, payload: Any) -> None:
 
 def sha_array(x: np.ndarray) -> str:
     a = np.asarray(x, dtype='<f8').copy()
-    # Canonicalize NaN payloads for deterministic hashing.
     a[np.isnan(a)] = np.nan
     return hashlib.sha256(np.ascontiguousarray(a).view(np.uint8)).hexdigest()
 
@@ -58,11 +57,7 @@ def expfunc(x: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
 def fit_photobleaching(activity_trace: np.ndarray, vps: float) -> tuple[np.ndarray, np.ndarray]:
     xvals = np.arange(activity_trace.shape[-1], dtype=float) / float(vps)
     nonnans = ~np.isnan(activity_trace)
-    if np.count_nonzero(nonnans) < 10:
-        raise RuntimeError('too few finite samples for source photobleach fit')
     scale = float(np.nanmean(activity_trace))
-    if not np.isfinite(scale) or abs(scale) < 1e-12:
-        raise RuntimeError('invalid source photobleach scale')
     scaled = activity_trace / scale
     num_lengths = 8.0
     bounds = ([0.0, 1.0 / (num_lengths * np.nanmax(xvals)), 0.0],
@@ -87,25 +82,19 @@ def correct_photobleaching(raw: np.ndarray, vps: float) -> tuple[np.ndarray, dic
     medfilt_window = int(np.ceil(window_s * vps / 2.0) * 2 + 1)
     smoothed = medfilt(raw, [1, medfilt_window])
     out = np.zeros_like(raw, dtype=float)
-    failed_flat = 0
-    hard_fail = 0
+    flat_fallback = 0
     for row in range(raw.shape[0]):
-        try:
-            popt, xvals = fit_photobleaching(smoothed[row], vps)
-            residual = raw[row] - expfunc(xvals, *popt)
-            ss_fit = float(np.nansum(np.square(residual)))
-            flat = float(np.nanmean(raw[row]))
-            ss_flat = float(np.nansum(np.square(raw[row] - flat)))
-            if ss_fit > ss_flat:
-                out[row] = raw[row]
-                failed_flat += 1
-            else:
-                out[row] = popt[0] * raw[row] / expfunc(xvals, *popt)
-        except Exception:
-            # Source code assumes fitability. Preserve raw trace on a hard fit failure and count it explicitly.
+        popt, xvals = fit_photobleaching(smoothed[row], vps)
+        residual = raw[row] - expfunc(xvals, *popt)
+        ss_fit = float(np.nansum(np.square(residual)))
+        flat = float(np.nanmean(raw[row]))
+        ss_flat = float(np.nansum(np.square(raw[row] - flat)))
+        if ss_fit > ss_flat:
             out[row] = raw[row]
-            hard_fail += 1
-    return out, {'flat_fallback_neurons': failed_flat, 'hard_fit_fallback_neurons': hard_fail, 'median_filter_frames': medfilt_window}
+            flat_fallback += 1
+        else:
+            out[row] = popt[0] * raw[row] / expfunc(xvals, *popt)
+    return out, {'flat_fallback_neurons': flat_fallback, 'median_filter_frames': medfilt_window}
 
 
 def close_nan_holes(x: np.ndarray) -> np.ndarray:
@@ -125,8 +114,6 @@ def decorrelate_neurons_linear(R: np.ndarray, G: np.ndarray) -> tuple[np.ndarray
     nanmask = np.isnan(R) | np.isnan(G)
     for n in range(R.shape[0]):
         mask = ~nanmask[n]
-        if np.count_nonzero(mask) < 3:
-            continue
         red = np.expand_dims(R[n, mask].T, axis=1)
         design = np.concatenate([red, np.ones(red.shape)], axis=1)
         best_fit, _, _, _ = np.linalg.lstsq(design, G[n, mask].T, rcond=None)
@@ -188,9 +175,7 @@ def reconstruct_record(rid: str, cutoff: int | None) -> dict[str, Any]:
     G_smooth_interp = np.array([gauss_filter_nan(line, WINDOW_GCAMP) for line in G])
     R_smooth_interp = np.array([gauss_filter_nan(line, WINDOW_GCAMP) for line in R])
     smooth_all_finite = bool(np.all(np.isfinite(I_smooth_interp)))
-    bad_neurs = 0
-    frac_allowed = 0.5 + float(bad_neurs) / I.shape[0]
-    valid_map = np.flatnonzero(np.mean(np.isnan(I), axis=0) < frac_allowed)
+    valid_map = np.flatnonzero(np.mean(np.isnan(I), axis=0) < 0.5)
     time = has_time.copy()
     if valid_map.size:
         time = time - time[valid_map[0]]
@@ -239,19 +224,16 @@ def reconstruct_record(rid: str, cutoff: int | None) -> dict[str, Any]:
 
 def main() -> None:
     records = {rid: reconstruct_record(rid, cutoff) for rid, cutoff in dataset_rows()}
-    canonical_all = all(r['canonical_I_smooth_interp_all_finite'] for r in records.values())
-    fits_all = all(r['canonical_I_channels_with_finite_motion_fit'] == r['channels'] for r in records.values())
-    population_all = all(r['valid_population_frame_fraction'] >= 0.50 for r in records.values())
-    source_gates = {
-        'C1_canonical_smoothed_interpolated_signal_finite_all_records': canonical_all,
-        'C2_motion_fit_available_all_channels_all_records': fits_all,
-        'C3_majority_nan_valid_map_retains_at_least_half_frames_all_records': population_all,
-        'C4_ratio2_not_used_as_input': True,
+    checks = {
+        'C1_canonical_smoothed_interpolated_signal_finite_all_records': all(r['canonical_I_smooth_interp_all_finite'] for r in records.values()),
+        'C2_motion_fit_available_all_channels_all_records': all(r['canonical_I_channels_with_finite_motion_fit'] == r['channels'] for r in records.values()),
+        'C3_majority_nan_valid_map_retains_at_least_half_frames_all_records': all(r['valid_population_frame_fraction'] >= 0.50 for r in records.values()),
+        'C4_ratio2_not_used_as_canonical_input': True,
         'C5_no_cross_record_identity_mapping': True,
         'C6_no_behavioral_prediction_built': True,
     }
-    passed = sum(source_gates.values())
-    status = 'TRAINING_SOURCE_RECONSTRUCTION_PASS' if passed == len(source_gates) else 'TRAINING_SOURCE_RECONSTRUCTION_FAIL'
+    passed = sum(checks.values())
+    status = 'TRAINING_SOURCE_RECONSTRUCTION_PASS' if passed == len(checks) else 'TRAINING_SOURCE_RECONSTRUCTION_FAIL'
     verdict = 'RATIO2_NONCANONICAL_CANONICAL_SIGNAL_RECOVERED' if status.endswith('PASS') else 'RATIO2_NONCANONICAL_CANONICAL_SIGNAL_RECONSTRUCTION_FAIL'
     result = {
         'schema': 'bio-001-s42-canonical-reconstruction-result-v1',
@@ -265,8 +247,8 @@ def main() -> None:
         'status': status,
         'verdict': verdict,
         'passed_checks': passed,
-        'total_checks': len(source_gates),
-        'checks': source_gates,
+        'total_checks': len(checks),
+        'checks': checks,
         'records': records,
         'CeRSI_v2_delta': 0.0,
         'behavioral_prediction_built': False,
@@ -280,7 +262,7 @@ def main() -> None:
         'status': status,
         'verdict': verdict,
         'passed_checks': passed,
-        'total_checks': len(source_gates),
+        'total_checks': len(checks),
         'CeRSI_v2_delta': 0.0,
         'AML32_chip_opened': False,
     }
