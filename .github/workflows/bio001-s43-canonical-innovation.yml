@@ -1,0 +1,78 @@
+name: BIO-001 S43 canonical calcium innovation
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  s43-innovation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install frozen runtime
+        run: python -m pip install "numpy==2.5.1" "scipy==1.17.0"
+
+      - name: Verify syntax and expose exact public bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/s43_audit.py tools/bio001_s42_acquire.py
+          python -m py_compile tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/s43_audit.py tools/bio001_s42_acquire.py
+
+      - name: Acquire verified AML310 moving training archive only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/bio001_s42_acquire.py
+          mkdir -p s43_data/training s43_artifacts
+          tar -xzf s42_artifacts/raw/AML310_moving.tar.gz -C s43_data/training
+          cp s42_artifacts/source_manifest.json s43_artifacts/source_manifest.json
+          ln -s "$(pwd)/s43_data" s42_data
+
+      - name: Execute frozen primary and exact rerun
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf s43_output
+          python tools/s43_calcium_innovation.py
+          mv s43_output s43_primary
+          python tools/s43_calcium_innovation.py
+          mv s43_output s43_rerun
+
+      - name: Independent source, gate, rerun and nonaccess audit
+        run: python tools/s43_audit.py
+
+      - name: Package evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p s43_evidence
+          cp tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/s43_audit.py tools/bio001_s42_acquire.py s43_evidence/ || true
+          cp s43_primary/*.json s43_evidence/ 2>/dev/null || true
+          cp s43_rerun/*.json s43_evidence/ 2>/dev/null || true
+          cp s43_independent_audit.json s43_evidence/ 2>/dev/null || true
+          cp s43_artifacts/source_manifest.json s43_evidence/ 2>/dev/null || true
+          (cd s43_evidence && sha256sum * > manifest.sha256)
+
+      - name: Upload S43 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s43-canonical-innovation-evidence
+          path: s43_evidence/
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: warn
