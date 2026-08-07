@@ -1,0 +1,179 @@
+name: LAZARUS source adapter public parity v1
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install frozen-science dependencies
+        run: python -m pip install 'numpy>=2.0' 'scipy>=1.13' 'scikit-learn>=1.5'
+      - name: Verify staged adapter identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(sha256sum lazarus-public-compute/catnap_source_adapter_v1.py | awk '{print $1}')"
+          test "$actual" = "ad0f8229228e4aabf091fa7a5849d25ca95ed795f36f86b9f4e813ccd586fbb9"
+      - name: Decode exact frozen sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source-parity/frozen
+          python - <<'PY'
+          import base64,gzip,hashlib,json
+          from pathlib import Path
+          payloads={
+            'legacy':('lazarus-public-compute/payload/lazarus_public_compute.py.gz.b64','7429d615a4fcbcff529270ed25dbfb6e1395b07883dda59d4f9317724bfd6a2c'),
+            'prospective':('lazarus-public-compute/payload/lazarus_prospective_snapshot_compute.py.gz.b64','3e27e43dc33ba8deac14d4b981cd8fe9d7d220cd01e908f31fee51fb4e9a200c'),
+          }
+          receipt={}
+          for name,(path,expected) in payloads.items():
+            text=Path(path).read_bytes(); compressed=base64.b64decode(b''.join(text.split()),validate=True); decoded=gzip.decompress(compressed)
+            actual=hashlib.sha256(decoded).hexdigest()
+            if actual != expected: raise SystemExit(f'{name} decoded SHA drift: {actual}')
+            Path(f'source-parity/frozen/{name}.py').write_bytes(decoded)
+            receipt[name]={'decoded_sha256':actual,'decoded_bytes':len(decoded)}
+          Path('source-parity/frozen/SOURCE_IDENTITY.json').write_text(json.dumps(receipt,indent=2,sort_keys=True)+'\n')
+          PY
+      - name: Recover exact official July CATNAP snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          python cases/7838a640602a3a78463d52e06e2a614a/fetch_archive.py
+      - name: Prove 63112-pair July parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib,importlib.util,json,sys
+          from pathlib import Path
+          import numpy as np
+
+          def load(path,name):
+            spec=importlib.util.spec_from_file_location(name,path)
+            if spec is None or spec.loader is None: raise RuntimeError(path)
+            module=importlib.util.module_from_spec(spec);sys.modules[name]=module;spec.loader.exec_module(module);return module
+
+          adapter=load(Path('lazarus-public-compute/catnap_source_adapter_v1.py'),'catnap_adapter')
+          legacy=load(Path('source-parity/frozen/legacy.py'),'frozen_legacy')
+          prospective=load(Path('source-parity/frozen/prospective.py'),'frozen_prospective')
+          data=Path('cases/7838a640602a3a78463d52e06e2a614a/artifacts/catnap-2026-07-01')
+          families=Path('lazarus-public-compute/frozen/primary_family_components_v1.csv')
+          if hashlib.sha256(families.read_bytes()).hexdigest() != adapter.EXPECTED_FAMILY_SHA256:
+            raise SystemExit('family graph identity drift')
+
+          family_by,_=legacy.load_family_map(families)
+          old_rows,abseq,vseq,old_keys=prospective.training_pairs(legacy,data,family_by)
+          design=adapter.ADAPTER.build_training_design(data,families)
+
+          old_order=[(row.antibody,row.virus) for row in old_rows]
+          new_order=list(zip(design.antibody_id.astype(str),design.virus_id.astype(str),strict=True))
+          if old_order != new_order: raise SystemExit('canonical July pair ordering drift')
+          old_truth=np.asarray([row.target for row in old_rows],dtype=np.float64)
+          if not np.array_equal(design.truth,old_truth): raise SystemExit('July truth drift')
+
+          old_raw,_=legacy.feature_tables(old_rows,[old_rows[0]],abseq,vseq)
+          if not np.array_equal(design.x_raw,old_raw):
+            raise SystemExit(f'raw feature drift max={float(np.max(np.abs(design.x_raw-old_raw)))}')
+
+          ta=sorted({row.antibody for row in old_rows});tv=sorted({row.virus for row in old_rows})
+          old_a,_=legacy.selected_embed(abseq,ta,[ta[0]],'antibody')
+          old_v,_=legacy.selected_embed(vseq,tv,[tv[0]],'virus')
+          old_selected=legacy.joint(old_rows,old_a,old_v)
+          if not np.array_equal(design.x_residual,old_selected):
+            raise SystemExit(f'selected feature drift max={float(np.max(np.abs(design.x_residual-old_selected)))}')
+          if not np.array_equal(design.x_router,design.x_raw): raise SystemExit('router/raw feature drift')
+
+          counts={
+            'pairs':len(new_order),
+            'antibodies':len(set(design.antibody_id.astype(str))),
+            'viruses':len(set(design.virus_id.astype(str))),
+            'families':len(set(design.antibody_family.astype(str))),
+            'virus_sequence_clusters':len(set(design.virus_cluster.astype(str))),
+          }
+          expected={'pairs':63112,'antibodies':575,'viruses':1507,'families':228}
+          for key,value in expected.items():
+            if counts[key] != value: raise SystemExit(f'{key} drift {counts[key]} != {value}')
+          if len(old_keys) != 63112: raise SystemExit('frozen source training key count drift')
+
+          receipt={
+            'schema_version':'1.0',
+            'formal_outcome':'CATNAP_SOURCE_ADAPTER_JULY_PARITY_PASS',
+            'adapter_sha256':adapter.ADAPTER.adapter_sha256,
+            'legacy_source_sha256':'7429d615a4fcbcff529270ed25dbfb6e1395b07883dda59d4f9317724bfd6a2c',
+            'prospective_source_sha256':'3e27e43dc33ba8deac14d4b981cd8fe9d7d220cd01e908f31fee51fb4e9a200c',
+            'training_counts':counts,
+            'raw_width':int(design.x_raw.shape[1]),
+            'residual_width':int(design.x_residual.shape[1]),
+            'router_width':int(design.x_router.shape[1]),
+            'canonical_pair_order_byte_identical':True,
+            'truth_byte_identical':True,
+            'raw_feature_matrix_elementwise_identical':True,
+            'residual_feature_matrix_elementwise_identical':True,
+            'router_feature_matrix_equals_raw':True,
+            'target_archive_path_received':False,
+            'august_target_bytes_read':0,
+            'september_target_bytes_read':0,
+            'target_rows_read':0,
+            'target_values_read':0,
+            'supervised_fits':0,
+            'private_repository_bytes_read':0,
+            'scientific_execution_authorized':False,
+          }
+          out=Path('source-parity/CATNAP_SOURCE_ADAPTER_JULY_PARITY_RECEIPT.json')
+          out.write_text(json.dumps(receipt,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(receipt,sort_keys=True))
+          PY
+      - name: Synthetic target-newness and no-refit adversarial audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import importlib.util,json,sys,tempfile
+          from pathlib import Path
+          import numpy as np
+          p=Path('lazarus-public-compute/catnap_source_adapter_v1.py')
+          spec=importlib.util.spec_from_file_location('adapter_target_audit',p);m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
+          with tempfile.TemporaryDirectory() as td:
+            td=Path(td)
+            assay=td/'assay_2026-09-01.txt';fasta=td/'virseqs_aa_O_2026-09-01.fasta'
+            assay.write_text('Antibody\tVirus\tIC50\nA\tVNEW\t1\nA\tVOLD\t2\n',encoding='utf-8')
+            fasta.write_text('>x.VNEW.y\nACDEFG\n>x.VOLD.y\nYYYYYY\n',encoding='utf-8')
+            matrix,_=m.generic_matrix(assay,fasta,minimum_virus_edges=1)
+            assert set(matrix)=={('A','VNEW'),('A','VOLD')}
+            train_matrix,_=m.generic_matrix(assay,fasta,minimum_virus_edges=10)
+            assert train_matrix=={}
+          receipt={'status':'TARGET_RULE_SYNTHETIC_ADVERSARIAL_PASS','target_minimum_virus_edges':1,'training_minimum_virus_edges':10,'label_based_selection':False,'target_batch_representation_fits':0,'target_statistics_used':0}
+          Path('source-parity/TARGET_RULE_ADVERSARIAL_RECEIPT.json').write_text(json.dumps(receipt,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(receipt,sort_keys=True))
+          PY
+      - name: Seal public parity manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          root=Path('source-parity')
+          files={}
+          for p in sorted(root.rglob('*')):
+            if p.is_file(): files[str(p.relative_to(root))]={'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()}
+          manifest={'schema_version':'1.0','status':'SEALED','public_compute':True,'private_repository_bytes_read':0,'august_target_bytes_read':0,'september_target_bytes_read':0,'scientific_supervised_fits':0,'files':files}
+          (root/'PUBLIC_PARITY_MANIFEST.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazarus-source-adapter-public-parity-${{ github.run_id }}
+          path: source-parity/
+          if-no-files-found: error
+          retention-days: 14
