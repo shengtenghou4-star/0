@@ -1,0 +1,71 @@
+name: BIO-001 S40 identity metadata phase A
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  s40-phaseA:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install structural runtime
+        run: python -m pip install "scipy==1.17.0"
+
+      - name: Compile frozen structural scripts
+        run: python -m py_compile tools/bio001_s40_acquire.py tools/s40_identity_inventory.py
+
+      - name: Acquire hash-verified AML310 moving training archive only
+        run: |
+          set -euo pipefail
+          python tools/bio001_s40_acquire.py
+          mkdir -p s40_data/training
+          tar -xzf s40_artifacts/raw/AML310_moving.tar.gz -C s40_data/training
+
+      - name: Execute structural-only identity inventory
+        run: python tools/s40_identity_inventory.py
+
+      - name: Verify nonaccess receipt
+        run: |
+          python - <<'PY'
+          import json
+          p=json.load(open('s40_artifacts/source_manifest.json'))
+          assert p['development_source_accessed'] is False
+          assert p['sealed_holdout_requested'] is False
+          assert p['sealed_holdout_listed'] is False
+          assert p['sealed_holdout_downloaded'] is False
+          assert p['sealed_holdout_opened'] is False
+          q=json.load(open('s40_phaseA/s40_phaseA_identity_inventory.json'))
+          assert q['structural_only'] is True
+          assert q['numeric_neural_behavior_values_inspected'] is False
+          print({'status':'PASS','identity_class':q['identity_class'],'phaseB_route':q['phaseB_route']})
+          PY
+
+      - name: Package phase A evidence
+        run: |
+          set -euo pipefail
+          mkdir -p s40_phaseA_evidence
+          cp tools/s40_identity_inventory.py tools/bio001_s40_acquire.py s40_phaseA_evidence/
+          cp s40_phaseA/s40_phaseA_identity_inventory.json s40_phaseA_evidence/
+          cp s40_artifacts/source_manifest.json s40_phaseA_evidence/
+          (cd s40_phaseA_evidence && sha256sum * > manifest.sha256)
+
+      - name: Upload S40 phase A evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s40-identity-phaseA-evidence
+          path: s40_phaseA_evidence/
+          compression-level: 9
+          retention-days: 30
