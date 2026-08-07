@@ -1,0 +1,145 @@
+
+
+def transform_source(rec: Record, source: str) -> tuple[np.ndarray,dict[str,Any]]:
+    X=rec.innovation.copy(); n=X.shape[1]; seed=stable_seed(rec.record_id,source); rng=np.random.default_rng(seed)
+    if source=='REAL': out=X
+    elif source=='TIME_REVERSED': out=X[:,::-1].copy()
+    elif source=='PHASE_SCRAMBLED':
+        out=np.empty_like(X)
+        for j in range(X.shape[0]):
+            spec=np.fft.rfft(X[j]); phases=rng.uniform(0,2*np.pi,size=spec.size); phases[0]=0.0
+            if n%2==0: phases[-1]=0.0
+            z=np.abs(spec)*np.exp(1j*phases); z[0]=spec[0]
+            if n%2==0: z[-1]=spec[-1]
+            out[j]=np.fft.irfft(z,n=n)
+    elif source=='INDEPENDENT_CIRCULAR_SHIFT':
+        out=np.empty_like(X); shifts=[]
+        for j in range(X.shape[0]):
+            shift=int(rng.integers(20,max(21,n-19)))
+            if shift>=n-19: shift=n-20
+            shift=max(20,shift); shifts.append(shift); out[j]=np.roll(X[j],shift)
+    else: raise ValueError(source)
+    return out,{'source':source,'seed':int(seed),'shape':[int(x) for x in out.shape],'finite':bool(np.all(np.isfinite(out))),
+                'offline_negative_control':source!='REAL'}
+
+
+def deterministic_pca_scores(X: np.ndarray, warm_end: int, k: int) -> np.ndarray:
+    W=X[:,:warm_end+1].T
+    mean=np.mean(W,axis=0); Z=W-mean
+    cov=Z.T@Z/max(len(Z),1)
+    vals,vecs=np.linalg.eigh(cov); basis=vecs[:,np.argsort(vals)[::-1][:k]].copy()
+    for i in range(basis.shape[1]):
+        j=int(np.argmax(np.abs(basis[:,i])))
+        if basis[j,i]<0: basis[:,i]*=-1
+    return (X.T-mean)@basis
+
+
+def population_stats(X: np.ndarray) -> np.ndarray:
+    T=X.T
+    med=np.median(T,axis=1); mad=1.4826*np.median(np.abs(T-med[:,None]),axis=1)
+    return np.column_stack([
+        np.mean(T,axis=1), med, np.std(T,axis=1), mad,
+        np.quantile(T,0.10,axis=1),np.quantile(T,0.25,axis=1),np.quantile(T,0.75,axis=1),np.quantile(T,0.90,axis=1),
+        np.mean(T>1.0,axis=1),np.mean(T<-1.0,axis=1)])
+
+
+def readout_features(rec: Record, source_matrix: np.ndarray, readout: str) -> np.ndarray:
+    if readout=='POP': base=population_stats(source_matrix)
+    elif readout=='PCA4': base=deterministic_pca_scores(source_matrix,rec.warmup_boundary,4)
+    elif readout=='PCA8': base=deterministic_pca_scores(source_matrix,rec.warmup_boundary,8)
+    else: raise ValueError(readout)
+    feats=[]
+    for lag in NEURAL_LAGS:
+        shifted=np.zeros_like(base); shifted[lag:]=base[:len(base)-lag] if lag else base
+        feats.append(shifted)
+    return np.column_stack(feats)
+
+
+@dataclass
+class EventSet:
+    current_frames: np.ndarray
+    reveal_frames: np.ndarray
+    X: np.ndarray
+    y: np.ndarray
+    scored_mask: np.ndarray
+
+
+def behavior_features(rec: Record, bs: BehaviorState, f: int) -> np.ndarray | None:
+    if f<max(BEHAVIOR_LAGS): return None
+    parts=[]
+    for lag in BEHAVIOR_LAGS:
+        j=f-lag
+        parts.extend([(bs.v_ema[j]-bs.v_center)/bs.v_scale,(bs.k_ema[j]-bs.k_center)/bs.k_scale])
+    v_now=bs.v_ema[f]; k_now=bs.k_ema[f]
+    v_prev=bs.v_ema[f-1]; k_prev=bs.k_ema[f-1]
+    parts.extend([(v_now-v_prev)/bs.v_scale,(k_now-k_prev)/bs.k_scale,float(bs.duration[f])/20.0])
+    state=str(bs.state[f]); parts.extend(float(state==s) for s in STATES)
+    for w in (5,10,20): parts.append(float(sum((f-w)<x<=f for x in bs.transition_onsets))/max(w,1))
+    arr=np.asarray(parts,float)
+    return arr if np.all(np.isfinite(arr)) else None
+
+
+def build_events(rec: Record, bs: BehaviorState, endpoint: str, neural: np.ndarray|None) -> EventSet:
+    kind,horizon=ENDPOINTS[endpoint]
+    current=[]; reveal=[]; feats=[]; labels=[]
+    onsets=sorted(bs.transition_onsets)
+    score_start=rec.warmup_boundary+EMBARGO
+    for f in range(max(BEHAVIOR_LAGS),len(rec.frames)-horizon):
+        if not rec.quality[f]: continue
+        b=behavior_features(rec,bs,f)
+        if b is None: continue
+        ns=[]
+        if neural is not None:
+            # Neural lags are already embedded in neural readout; require current source-quality support only.
+            if f>=len(neural): continue
+            ns=neural[f]
+            if not np.all(np.isfinite(ns)): continue
+        ev=[]
+        for q in onsets:
+            if f<q<=f+horizon:
+                old,new=bs.transition_onsets[q]
+                if kind=='ANY' or (kind=='TURN' and new in ('TURN_LEFT','TURN_RIGHT')): ev.append(q)
+        y=float(bool(ev)); rf=int(min(ev)) if ev else int(f+horizon)
+        x=np.concatenate([b,np.asarray(ns,float)]) if neural is not None else b
+        if not np.all(np.isfinite(x)): continue
+        current.append(f); reveal.append(rf); feats.append(x); labels.append(y)
+    cf=np.asarray(current,int); rv=np.asarray(reveal,int); X=np.asarray(feats,float); y=np.asarray(labels,float)
+    scored=cf>=score_start
+    return EventSet(cf,rv,X,y,scored)
+
+
+class DelayedRidge:
+    def __init__(self,p:int,alpha:float):
+        self.A=np.eye(p+1)*alpha; self.A[0,0]=INTERCEPT_PRIOR; self.b=np.zeros(p+1); self.w=np.zeros(p+1)
+    def update(self,x:np.ndarray,y:float)->None:
+        z=np.concatenate([[1.0],x]); self.A+=np.outer(z,z); self.b+=z*y; self.w=np.linalg.solve(self.A,self.b)
+    def predict(self,x:np.ndarray)->float:
+        z=np.concatenate([[1.0],x]); return float(np.clip(z@self.w,0.01,0.99))
+
+
+def prequential(es: EventSet,alpha:float)->dict[str,Any]:
+    model=DelayedRidge(es.X.shape[1],alpha); pending=[]; probs=[]; ys=[]; frames=[]
+    for f,r,x,y,score in zip(es.current_frames,es.reveal_frames,es.X,es.y,es.scored_mask):
+        matured=[q for q in pending if q[0]<=f]; pending=[q for q in pending if q[0]>f]
+        for _,qx,qy in matured: model.update(qx,qy)
+        p=model.predict(x)
+        if score: probs.append(p); ys.append(float(y)); frames.append(int(f))
+        pending.append((int(r),x.copy(),float(y)))
+    p=np.asarray(probs,float); y=np.asarray(ys,float)
+    if len(p)==0: return {'finite':False,'samples':0,'positives':0,'negatives':0,'brier':999.0,'logloss':999.0,'positive_rate':0.0,'probability_min':0.0,'probability_max':0.0}
+    brier=float(np.mean((p-y)**2)); ll=float(-np.mean(y*np.log(p)+(1-y)*np.log(1-p)))
+    return {'finite':bool(np.all(np.isfinite(p))),'samples':int(len(p)),'positives':int(np.sum(y)),'negatives':int(len(y)-np.sum(y)),
+            'positive_rate':float(np.mean(y)),'brier':brier,'logloss':ll,'probability_min':float(np.min(p)),'probability_max':float(np.max(p)),'frames':frames}
+
+
+def support_ok(metric: dict[str,Any],endpoint:str)->bool:
+    min_pos=3 if endpoint==PRIMARY else 5
+    return metric['samples']>=50 and metric['positives']>=min_pos and metric['negatives']>=20
+
+
+def cfg_key(cfg:dict[str,Any])->tuple:
+    return (bool(cfg['off']),str(cfg['readout']),float(cfg['alpha']))
+
+
+def run_model(rec:Record,bs:BehaviorState,endpoint:str,neural:np.ndarray|None,alpha:float)->dict[str,Any]:
+    return prequential(build_events(rec,bs,endpoint,neural),alpha)
