@@ -1,0 +1,90 @@
+name: LAZARUS September hash-only commitment v1
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  hash-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Verify exact private runner identity and static no-extraction boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          path="cases/lazarus-september-hash-commit-v1/commit_september_catnap_archive_hash_v1.py"
+          test "$(git hash-object "$path")" = "65abcb9ff23604e3312b48c24e24de93ad504280"
+          ! grep -Eq '(^|[^A-Za-z0-9_])tarfile([^A-Za-z0-9_]|$)' "$path"
+          ! grep -Eq 'extract(all|file)?\(' "$path"
+          grep -q 'CATNAP_2026_09_01.tar.gz' "$path"
+          grep -q 'TARGET_ARCHIVE_HASH_COMMITTED' "$path"
+          sha256sum "$path" > runner-sha256.txt
+      - name: Execute real current-page hash-only transaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python cases/lazarus-september-hash-commit-v1/commit_september_catnap_archive_hash_v1.py
+      - name: Adversarially verify sealed receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          root=Path('september-hash-commitment-v1')
+          files=sorted(p.name for p in root.iterdir() if p.is_file())
+          assert files == ['SEPTEMBER_TARGET_ARCHIVE_HASH_COMMITMENT.json'], files
+          receipt=json.loads((root/files[0]).read_text())
+          assert receipt['release']=='2026-09-01'
+          assert receipt['archive_name']=='CATNAP_2026_09_01.tar.gz'
+          assert receipt['status'] in {'ABORT_TARGET_UNAVAILABLE','TARGET_ARCHIVE_HASH_COMMITTED'}
+          assert receipt['archive_members_listed']==0
+          assert receipt['archive_members_extracted']==0
+          assert receipt['target_rows_parsed']==0
+          assert receipt['target_values_read']==0
+          assert receipt['scientific_supervised_fits']==0
+          assert receipt['scientific_execution_authorized'] is False
+          assert receipt['date_substitution_used'] is False
+          if receipt['status']=='ABORT_TARGET_UNAVAILABLE':
+              assert receipt['archive_sha256'] is None
+              assert receipt['archive_bytes'] is None
+              assert receipt['target_archive_bytes_hashed']==0
+          else:
+              assert isinstance(receipt['archive_bytes'],int) and receipt['archive_bytes']>0
+              assert len(receipt['archive_sha256'])==64
+              assert receipt['archive_sha256']==receipt['independent_archive_sha256']
+              assert receipt['hash_implementations_agree'] is True
+              assert receipt['target_archive_bytes_hashed']==receipt['archive_bytes']
+          manifest={
+              'schema_version':'1.0',
+              'status':'SEALED',
+              'transaction_status':receipt['status'],
+              'runner_git_blob':'65abcb9ff23604e3312b48c24e24de93ad504280',
+              'runner_sha256':hashlib.sha256(Path('cases/lazarus-september-hash-commit-v1/commit_september_catnap_archive_hash_v1.py').read_bytes()).hexdigest(),
+              'receipt_sha256':hashlib.sha256((root/files[0]).read_bytes()).hexdigest(),
+              'archive_members_listed':0,
+              'archive_members_extracted':0,
+              'target_rows_parsed':0,
+              'target_values_read':0,
+              'scientific_supervised_fits':0,
+              'private_repository_bytes_read':0,
+          }
+          (root/'PUBLIC_HASH_ONLY_MANIFEST.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({'receipt':receipt,'manifest':manifest},sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazarus-september-hash-only-${{ github.run_id }}
+          path: |
+            september-hash-commitment-v1/
+            runner-sha256.txt
+          if-no-files-found: error
+          retention-days: 14
