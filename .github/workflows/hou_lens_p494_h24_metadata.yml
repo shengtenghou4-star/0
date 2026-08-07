@@ -19,9 +19,12 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install --disable-pip-version-check requests==2.32.5
       - run: python hou_lens_p494/p494_resolve_h24_catalogue.py
+      - run: python hou_lens_p494/p494_resolve_r_tile_quality.py
       - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: hou-lens-p494-h24-metadata
-          path: p494_tap_artifact/
+          path: |
+            p494_tap_artifact/
+            p494_tile_quality_artifact/
           if-no-files-found: error
