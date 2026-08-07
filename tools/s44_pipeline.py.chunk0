@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+import hashlib
+import itertools
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+from scipy.io import loadmat
+
+import s42_canonical_reconstruction as canon
+import s43_calcium_innovation as s43
+
+ROOT = Path('s44_data/training')
+OUT = Path('s44_output')
+OUT.mkdir(parents=True, exist_ok=True)
+
+ENDPOINTS = {
+    'ANY_TRANSITION_10': ('ANY', 10),
+    'ANY_TRANSITION_20': ('ANY', 20),
+    'TURN_INITIATION_20': ('TURN', 20),
+}
+PRIMARY = 'TURN_INITIATION_20'
+SECONDARY = 'ANY_TRANSITION_20'
+SHORT = 'ANY_TRANSITION_10'
+SOURCES = ('REAL', 'TIME_REVERSED', 'PHASE_SCRAMBLED', 'INDEPENDENT_CIRCULAR_SHIFT')
+CONTROLS = SOURCES[1:]
+READOUTS = ('POP', 'PCA4', 'PCA8')
+ALPHAS = (10.0, 100.0)
+BEHAVIOR_LAGS = (0,1,2,3,5,8,13)
+NEURAL_LAGS = (0,1,3)
+WARM_FRAC = 0.40
+EMBARGO = 24
+STATE_EMA_SPAN = 5
+PERSIST = 3
+INNER_SAFETY = 1.10
+EPS = 1e-12
+INTERCEPT_PRIOR = 1e-9
+STATES = ('QUIET','FORWARD','REVERSE','TURN_LEFT','TURN_RIGHT')
+EXPECTED_I_SHA = s43.EXPECTED_S42_I_SHA
+
+
+def write_json(path: Path, payload: Any) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False), encoding='utf-8')
+
+
+def stable_seed(record_id: str, source: str) -> int:
+    d = hashlib.sha256(f'BIO001-S44::{record_id}::{source}'.encode()).digest()
+    return int.from_bytes(d[:8], 'big') % (2**32)
+
+
+def robust_center_scale(x: np.ndarray) -> tuple[float,float]:
+    x=np.asarray(x,float); x=x[np.isfinite(x)]
+    if x.size==0: return 0.0, 0.0
+    m=float(np.median(x)); mad=float(np.median(np.abs(x-m)))
+    return m, 1.4826*mad
+
+
+def causal_ema(x: np.ndarray, span: int=STATE_EMA_SPAN) -> np.ndarray:
+    out=np.empty_like(x,dtype=float); a=2.0/(span+1.0); out[0]=x[0]
+    for i in range(1,len(x)):
+        xi=x[i] if np.isfinite(x[i]) else out[i-1]
+        out[i]=(1-a)*out[i-1]+a*xi
+    return out
+
+
+def centerline_curvature_metric(folder: Path, heat: dict[str,Any]) -> np.ndarray:
+    center=loadmat(folder/'centerline.mat')
+    cl=np.rollaxis(np.asarray(center['centerline'],dtype=float),2,0)
+    npoints=cl.shape[1]
+    d=np.diff(cl,axis=1)
+    tangent=np.unwrap(np.arctan2(-d[:,:,1],d[:,:,0]),axis=-1)
+    curvature=np.unwrap(np.diff(tangent,axis=1),axis=-1)*npoints
+    metric=np.mean(curvature[:,15:80],axis=1)
+    mu=float(np.nanmean(metric)); sd=float(np.nanstd(metric))
+    if sd>0: metric[np.abs(metric-mu)>6*sd]=np.nan
+    bad=~np.isfinite(metric); good=~bad
+    if np.any(bad) and np.any(good): metric[bad]=np.interp(np.flatnonzero(bad),np.flatnonzero(good),metric[good])
+    clt=np.asarray(heat['clTime'],float).squeeze(); volt=np.asarray(heat['hasPointsTime'],float).squeeze()
+    idx=np.rint(np.interp(volt,clt,np.arange(clt.size))).astype(int); idx=np.clip(idx,0,len(metric)-1)
+    return metric[idx]
+
+
+@dataclass
+class Record:
+    record_id: str
+    frames: np.ndarray
+    velocity: np.ndarray
+    curvature: np.ndarray
+    warmup_boundary: int
+    quality: np.ndarray
+    innovation: np.ndarray  # channels x frames, zero-filled after warmup scaling
+    innovation_observed_fraction: np.ndarray
+    calcium_receipt: dict[str,Any]
+
+
+@dataclass
+class BehaviorState:
+    v_ema: np.ndarray
+    k_ema: np.ndarray
+    state: np.ndarray
+    duration: np.ndarray
+    transition_onsets: dict[int, tuple[str,str]]
+    movement_threshold: float
+    turn_threshold: float
+    v_center: float
+    v_scale: float
+    k_center: float
+    k_scale: float
+
+
+def derive_behavior_state(rec: Record) -> BehaviorState:
+    v=causal_ema(rec.velocity); k=causal_ema(rec.curvature)
+    warm=rec.frames<=rec.warmup_boundary
+    vpool=np.abs(v[warm & np.isfinite(v)]); vthr=max(float(np.quantile(vpool,0.35)),EPS)
+    moving=warm & np.isfinite(k) & (np.abs(v)>=vthr)
+    kpool=np.abs(k[moving])
+    if np.count_nonzero(moving)<20: kpool=np.abs(k[warm & np.isfinite(k)])
+    kthr=max(float(np.quantile(kpool,0.75)),EPS)
+    state=np.empty(len(v),dtype=object)
+    for i in range(len(v)):
+        if abs(v[i])<vthr: s='QUIET'
+        elif k[i]>=kthr: s='TURN_LEFT'
+        elif k[i]<=-kthr: s='TURN_RIGHT'
+        elif v[i]>0: s='FORWARD'
+        else: s='REVERSE'
+        state[i]=s
+    duration=np.ones(len(v),dtype=int)
+    for i in range(1,len(v)):
+        if state[i]==state[i-1]: duration[i]=duration[i-1]+1
+    onsets={}
+    for f in range(PERSIST,len(v)-PERSIST+1):
+        old=str(state[f-1]); new=str(state[f])
+        if old==new: continue
+        if all(str(state[f-j])==old for j in range(1,PERSIST+1)) and all(str(state[f+j])==new for j in range(PERSIST)):
+            onsets[f]=(old,new)
+    vc,vs=robust_center_scale(v[warm]); kc,ks=robust_center_scale(k[warm])
+    return BehaviorState(v,k,state,duration,onsets,vthr,kthr,vc,max(vs,EPS),kc,max(ks,EPS))
+
+
+def calcium_full_innovation(I: np.ndarray, quality: np.ndarray, warm_end: int, score_start: int) -> tuple[np.ndarray,np.ndarray,dict[str,Any]]:
+    channels=[]; observed=np.zeros_like(I,dtype=bool); dense=np.zeros_like(I,dtype=float)
+    selected_counts={'AR1':0,'AR3':0,'AR6':0}
+    for j in range(I.shape[0]):
+        ref=s43.select_and_score(I[j],quality,warm_end,score_start)
+        if ref is None:
+            channels.append({'channel':j,'admissible':False}); continue
+        Xall,yall,idx=s43.common_ar6_rows(I[j],quality)
+        warm=idx<=warm_end; score=idx>=score_start
+        family=ref['selected_family']; lags=tuple(ref['selected_lags']); alpha=float(ref['selected_alpha'])
+        cols=[s43.FULL_LAGS.index(l) for l in lags]
+        Xw=Xall[warm][:,cols]; yw=yall[warm]
+        xm=np.median(Xw,axis=0); xmad=np.median(np.abs(Xw-xm),axis=0); xsc=1.4826*xmad
+        xsc[~np.isfinite(xsc)|(xsc<EPS)]=1.0
+        ym,ysc=s43.robust_center_scale(yw)
+        if ysc<EPS: raise RuntimeError('unexpected degenerate selected channel')
+        beta=s43.ridge_fit((Xw-xm)/xsc,(yw-ym)/ysc,alpha)
+        pred=s43.predict(beta,(Xall[:,cols]-xm)/xsc)*ysc+ym
+        innovation=yall-pred
+        # Exact generator sentinel against the S43 scored output.
+        scored_innovation=innovation[score]
+        if not np.array_equal(idx[score],ref['score_idx']): raise RuntimeError('S43 score support drift')
+        if not np.allclose(scored_innovation,ref['innovation'],rtol=0,atol=1e-12): raise RuntimeError('S43 innovation drift')
+        wm=warm
+        med,scale=robust_center_scale(innovation[wm])
+        if scale<EPS: raise RuntimeError('innovation warm scale degenerate')
+        z=(innovation-med)/scale
+        dense[j,idx]=z; observed[j,idx]=True
+        selected_counts[family]+=1
+        channels.append({'channel':j,'admissible':True,'selected_family':family,'selected_alpha':alpha,
+                         'warm_rows':int(warm.sum()),'score_rows':int(score.sum()),'warm_innovation_scale':float(scale)})
+    admissible=np.array([c['admissible'] for c in channels],dtype=bool)
+    if np.count_nonzero(admissible)<20: raise RuntimeError('too few S43 admissible channels')
+    dense=dense[admissible]; observed=observed[admissible]
+    receipt={'structural_channels':int(I.shape[0]),'admissible_channels':int(admissible.sum()),
+             'selected_family_counts':selected_counts,'channel_receipts':channels}
+    return dense,observed,receipt
+
+
+def load_record(rid: str, cutoff: int|None) -> Record:
+    s43.ROOT=ROOT
+    I,time,quality,source_receipt=s43.reconstruct_unsmoothed_I(rid,cutoff)
+    if source_receipt['I_sha256']!=EXPECTED_I_SHA[rid]: raise RuntimeError('S42 I hash drift')
+    folder=sorted(p for p in ROOT.rglob(f'{rid}_MS') if p.is_dir())[0]
+    heat=loadmat(folder/'heatDataMS.mat')
+    behavior=heat['behavior'][0,0]
+    n=I.shape[1]
+    v=np.asarray(behavior['v'],float)[:n,0]
+    k=centerline_curvature_metric(folder,heat)[:n]
+    if np.any(~np.isfinite(v)):
+        good=np.isfinite(v)
+        if not np.any(good): raise RuntimeError('no finite velocity')
+        v[~good]=np.interp(np.flatnonzero(~good),np.flatnonzero(good),v[good])
+    warm_end=int(np.floor(WARM_FRAC*(n-1))); score_start=warm_end+EMBARGO
+    innovation,observed,calcium=calcium_full_innovation(I,quality,warm_end,score_start)
+    obsfrac=np.mean(observed,axis=0)
+    calcium['S42_source_receipt']=source_receipt
+    return Record(rid,np.arange(n,dtype=int),v,k,warm_end,quality,innovation,obsfrac,calcium)
+
+
+def load_records() -> list[Record]:
+    canon.ROOT=ROOT
+    return [load_record(rid,cutoff) for rid,cutoff in canon.dataset_rows()]
