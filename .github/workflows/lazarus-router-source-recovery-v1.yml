@@ -1,0 +1,38 @@
+name: LAZARUS router source recovery v1
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Decode frozen router payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir artifacts
+          python - <<'PY'
+          import base64,gzip,hashlib,json
+          from pathlib import Path
+          parts=[Path('lazarus-public-compute/payload/lazarus_regime_router_untouched_v1.py.gz.b64.part01'),Path('lazarus-public-compute/payload/lazarus_regime_router_untouched_v1.py.gz.b64.part02')]
+          text=b''.join(p.read_bytes() for p in parts)
+          compressed=base64.b64decode(b''.join(text.split()),validate=True)
+          decoded=gzip.decompress(compressed)
+          Path('artifacts/regime_router.py').write_bytes(decoded)
+          receipt={'schema_version':'1.0','private_bytes_read':0,'target_bytes_read':0,'part_sha256':[hashlib.sha256(p.read_bytes()).hexdigest() for p in parts],'joined_b64_sha256':hashlib.sha256(text).hexdigest(),'gzip_sha256':hashlib.sha256(compressed).hexdigest(),'decoded_sha256':hashlib.sha256(decoded).hexdigest(),'decoded_bytes':len(decoded)}
+          Path('artifacts/ROUTER_SOURCE_RECOVERY_RECEIPT.json').write_text(json.dumps(receipt,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(receipt,sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazarus-router-source-recovery-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 7
