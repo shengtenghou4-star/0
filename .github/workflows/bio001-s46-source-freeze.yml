@@ -1,0 +1,35 @@
+name: BIO-001 S46 frozen sparse source freeze
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-freeze:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install compile runtime
+        run: python -m pip install "numpy==2.5.1" "scipy==1.17.0"
+      - name: Assemble frozen S44 base and print S46 public bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum tools/s44_pipeline.py.chunk0 | awk '{print $1}')" = "60e373edce0c02da7f5eecef25bbdd1b13525705e24e60b1000fe959af38dbc2"
+          test "$(sha256sum tools/s44_pipeline.py.chunk1 | awk '{print $1}')" = "b33d9a1e696c119d3f406b6da1c390d56fd16df3b4b7489b10594d9ee0409030"
+          test "$(sha256sum tools/s44_pipeline.py.chunk2 | awk '{print $1}')" = "8b960a040ffb3c15721b7244156d8ff4142629f2eb84a4f003ddb87b7eed341b"
+          test "$(sha256sum tools/s44_pipeline.py.chunk3 | awk '{print $1}')" = "f55aa7b4cea6262db21f026da731f2673e05e633c8db0095d1772d71fa9a0977"
+          cat tools/s44_pipeline.py.chunk0 tools/s44_pipeline.py.chunk1 tools/s44_pipeline.py.chunk2 tools/s44_pipeline.py.chunk3 > tools/s44_pipeline.py
+          test "$(sha256sum tools/s44_pipeline.py | awk '{print $1}')" = "dd7717532903848bc1d1c4f3f77c32488496133c4dc3059e8ed03fc899a8ee4a"
+          sha256sum tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/s45_phaseA.py tools/s45_phaseA_portable.py tools/s44_pipeline.py tools/s46_pipeline.py tools/s46_audit.py tools/bio001_s42_acquire.py
+          python -m py_compile tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/s45_phaseA.py tools/s45_phaseA_portable.py tools/s44_pipeline.py tools/s46_pipeline.py tools/s46_audit.py tools/bio001_s42_acquire.py
+          echo S46_SOURCE_FREEZE_PASS
