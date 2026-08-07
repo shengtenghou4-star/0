@@ -22,8 +22,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p source-parity
+          blob="$(git hash-object lazarus-public-compute/catnap_source_adapter_v1.py)"
+          test "$blob" = "e5a2e8d3afe36962c472eb66202b7faa06447655"
           actual="$(sha256sum lazarus-public-compute/catnap_source_adapter_v1.py | awk '{print $1}')"
-          test "$actual" = "ad0f8229228e4aabf091fa7a5849d25ca95ed795f36f86b9f4e813ccd586fbb9"
+          printf '%s\n' "$actual" > source-parity/ADAPTER_SHA256.txt
+          printf '%s\n' "$blob" > source-parity/ADAPTER_GIT_BLOB_SHA.txt
+          echo "adapter_sha256=$actual"
       - name: Decode exact frozen sources
         shell: bash
         run: |
@@ -107,9 +112,10 @@ jobs:
           if len(old_keys) != 63112: raise SystemExit('frozen source training key count drift')
 
           receipt={
-            'schema_version':'1.0',
+            'schema_version':'1.1',
             'formal_outcome':'CATNAP_SOURCE_ADAPTER_JULY_PARITY_PASS',
             'adapter_sha256':adapter.ADAPTER.adapter_sha256,
+            'adapter_git_blob_sha':'e5a2e8d3afe36962c472eb66202b7faa06447655',
             'legacy_source_sha256':'7429d615a4fcbcff529270ed25dbfb6e1395b07883dda59d4f9317724bfd6a2c',
             'prospective_source_sha256':'3e27e43dc33ba8deac14d4b981cd8fe9d7d220cd01e908f31fee51fb4e9a200c',
             'training_counts':counts,
@@ -141,7 +147,6 @@ jobs:
           python - <<'PY'
           import importlib.util,json,sys,tempfile
           from pathlib import Path
-          import numpy as np
           p=Path('lazarus-public-compute/catnap_source_adapter_v1.py')
           spec=importlib.util.spec_from_file_location('adapter_target_audit',p);m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
           with tempfile.TemporaryDirectory() as td:
@@ -168,7 +173,7 @@ jobs:
           files={}
           for p in sorted(root.rglob('*')):
             if p.is_file(): files[str(p.relative_to(root))]={'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()}
-          manifest={'schema_version':'1.0','status':'SEALED','public_compute':True,'private_repository_bytes_read':0,'august_target_bytes_read':0,'september_target_bytes_read':0,'scientific_supervised_fits':0,'files':files}
+          manifest={'schema_version':'1.1','status':'SEALED','public_compute':True,'private_repository_bytes_read':0,'august_target_bytes_read':0,'september_target_bytes_read':0,'scientific_supervised_fits':0,'files':files}
           (root/'PUBLIC_PARITY_MANIFEST.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
           PY
       - uses: actions/upload-artifact@v4
