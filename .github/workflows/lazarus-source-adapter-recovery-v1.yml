@@ -1,0 +1,60 @@
+name: LAZARUS source adapter recovery v1
+
+on:
+  push:
+    branches:
+      - case/lazarus-source-adapter-recovery-v1
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Decode frozen public payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+          import base64, gzip, hashlib, json
+          from pathlib import Path
+
+          out = Path('artifacts')
+          out.mkdir()
+          payloads = {
+              'orth_residual': Path('lazarus-public-compute/payload/lazarus_orth_residual_compute.py.gz.b64'),
+              'legacy_public': Path('lazarus-public-compute/payload/lazarus_public_compute.py.gz.b64'),
+          }
+          expected_decoded = {
+              'orth_residual': '42c284c9f06f713a59443fae04987292b6fc39ff1de1f85e903207c6857a8c33',
+          }
+          receipt = {'schema_version':'1.0','private_bytes_read':0,'target_bytes_read':0,'payloads':{}}
+          for name, path in payloads.items():
+              text = path.read_bytes()
+              compressed = base64.b64decode(b''.join(text.split()), validate=True)
+              decoded = gzip.decompress(compressed)
+              decoded_path = out / f'{name}.py'
+              decoded_path.write_bytes(decoded)
+              item = {
+                  'b64_file_sha256': hashlib.sha256(text).hexdigest(),
+                  'gzip_sha256': hashlib.sha256(compressed).hexdigest(),
+                  'decoded_sha256': hashlib.sha256(decoded).hexdigest(),
+                  'decoded_bytes': len(decoded),
+              }
+              expected = expected_decoded.get(name)
+              if expected is not None and item['decoded_sha256'] != expected:
+                  raise SystemExit(f'{name} decoded SHA drift: {item["decoded_sha256"]}')
+              receipt['payloads'][name] = item
+          (out/'SOURCE_RECOVERY_RECEIPT.json').write_text(json.dumps(receipt, indent=2, sort_keys=True)+'\n')
+          print(json.dumps(receipt, sort_keys=True))
+          PY
+      - name: Upload recovered sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: lazarus-source-adapter-recovery-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 7
