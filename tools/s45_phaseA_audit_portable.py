@@ -14,12 +14,17 @@ def sha(path: Path) -> str:
     return h.hexdigest()
 
 
+def num(c: dict, key: str, default: float) -> float:
+    v = c.get(key, default)
+    return float(default if v is None else v)
+
+
 def rank_key(c: dict) -> tuple:
     return (0 if c.get('sparse_quality_pass',False) else 1,
-            float(c.get('innovation_max_abs_acf',999.0)),
-            float(c.get('innovation_lag1_abs_acf',999.0)),
-            abs(float(c.get('split_half_innovation_scale_ratio',999.0))-1.0),
-            -float(c.get('innovation_event_rate_per_minute',-1.0)), int(c['channel']))
+            num(c,'innovation_max_abs_acf',999.0),
+            num(c,'innovation_lag1_abs_acf',999.0),
+            abs(num(c,'split_half_innovation_scale_ratio',999.0)-1.0),
+            -num(c,'innovation_event_rate_per_minute',-1.0), int(c['channel']))
 
 p1=json.loads((ROOT/'s45_primary/s45_phaseA_result.json').read_text())
 p2=json.loads((ROOT/'s45_rerun/s45_phaseA_result.json').read_text())
