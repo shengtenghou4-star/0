@@ -34,9 +34,8 @@ jobs:
           test "$(sha256sum tools/s44_pipeline.py.chunk2 | awk '{print $1}')" = "8b960a040ffb3c15721b7244156d8ff4142629f2eb84a4f003ddb87b7eed341b"
           test "$(sha256sum tools/s44_pipeline.py.chunk3 | awk '{print $1}')" = "f55aa7b4cea6262db21f026da731f2673e05e633c8db0095d1772d71fa9a0977"
           cat tools/s44_pipeline.py.chunk0 tools/s44_pipeline.py.chunk1 tools/s44_pipeline.py.chunk2 tools/s44_pipeline.py.chunk3 > tools/s44_pipeline.py
-          sha256sum tools/s44_pipeline.py tools/s44_audit.py
-          test "$(sha256sum tools/s44_pipeline.py | awk '{print $1}')" = "f8d11b16f911fe8982c9e8af2e07240eafcf536c47fb8e7fcd66b545c6a8bc34"
-          test "$(sha256sum tools/s44_audit.py | awk '{print $1}')" = "69e0415305103b331a091c38e3b05ec119fd1a692f9b1ac3117a4d73b4e194b8"
+          test "$(sha256sum tools/s44_pipeline.py | awk '{print $1}')" = "dd7717532903848bc1d1c4f3f77c32488496133c4dc3059e8ed03fc899a8ee4a"
+          test "$(sha256sum tools/s44_audit.py | awk '{print $1}')" = "c6c9b326e04a18d4f14d50554a952d3a7f54bf9ec407bb212fb93c327193c2df"
           python -m py_compile tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/s44_pipeline.py tools/s44_audit.py tools/bio001_s42_acquire.py
           sha256sum tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/s44_pipeline.py tools/s44_audit.py tools/bio001_s42_acquire.py
 
