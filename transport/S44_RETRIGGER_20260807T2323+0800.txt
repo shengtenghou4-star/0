@@ -1,0 +1,6 @@
+BIO-001 S44 transport-only workflow retrigger.
+
+This file is not imported, executed, or read by the frozen S44 workflow or scientific pipeline.
+Scientific pipeline SHA-256 remains f8d11b16f911fe8982c9e8af2e07240eafcf536c47fb8e7fcd66b545c6a8bc34.
+Audit SHA-256 remains 69e0415305103b331a091c38e3b05ec119fd1a692f9b1ac3117a4d73b4e194b8.
+No data, endpoint, control, readout, nesting rule, threshold, or gate was changed.
