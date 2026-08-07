@@ -1,0 +1,29 @@
+name: BIO-001 S48 Dryad trajectory source freeze
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-freeze:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install compile runtime
+        run: python -m pip install "numpy==2.5.1" "scipy==1.17.0"
+      - name: Print and compile public scorer bytes only
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum tools/s48_target_common.py tools/s48_score.py tools/s48_audit.py
+          python -m py_compile tools/s48_target_common.py tools/s48_score.py tools/s48_audit.py
+          echo S48_SOURCE_FREEZE_PASS
