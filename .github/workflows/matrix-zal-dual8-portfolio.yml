@@ -1,0 +1,311 @@
+name: Matrix ZAL Dual8 Strengthened Portfolio
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/matrix-zal-dual8-portfolio.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: matrix-zal-dual8-strengthened-portfolio
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        case_id:
+          - b_8_8_8_10__n_8_9_10
+          - b_8_8_8_9__n_9_9_10
+          - b_8_8_9_10__n_8_8_10
+          - b_8_8_9_10__n_8_9_9
+          - b_8_8_9_9__n_8_9_10
+          - b_8_8_9_9__n_9_9_9
+          - b_8_9_9_9__n_8_8_10
+          - b_8_9_9_9__n_8_9_9
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Recover authority-bound sources, live22 and frontier
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          REQUEST_ID: 7a8f4d2e91c64b8aaf0357d12e6c9b44
+          CASE_ID: ${{ matrix.case_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/dual /tmp/result
+          python - <<'PY'
+          import base64, hashlib, json, os, pathlib, urllib.parse, urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; request=os.environ['REQUEST_ID']; case_id=os.environ['CASE_ID']
+          headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'zal-dual8-strengthened'}
+          def fetch(repo,path,ref):
+              q=urllib.parse.urlencode({'ref':ref})
+              req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}?{q}',headers=headers)
+              with urllib.request.urlopen(req,timeout=180) as r: env=json.load(r)
+              return base64.b64decode(env['content'])
+          def blob(data): return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          root=pathlib.Path('/tmp/dual')
+          raw=fetch('shengtenghou4-star/00',f'relay/requests/{request}/input.json','main'); inp=json.loads(raw)
+          expected=inp['residual_case_ids']
+          if case_id not in expected or len(expected)!=8 or len(set(expected))!=8: raise SystemExit('request/case mismatch')
+          auth=inp['authority']
+          dual=fetch('shengtenghou4-star/00',auth['dual_bound_script_queue_path'],'main')
+          base=fetch('shengtenghou4-star/00',auth['base_builder_queue_path'],'main')
+          portfolio=fetch('shengtenghou4-star/00',auth['portfolio_queue_path'],'main')
+          frontier=fetch('shengtenghou4-star/00',auth['frontier_queue_path'],auth['frontier_ref'])
+          live22=fetch(auth['upstream_repository'],auth['live22_path'],auth['upstream_ref'])
+          checks={
+            'dual_blob':blob(dual)==auth['dual_bound_script_git_blob'],
+            'base_blob':blob(base)==auth['base_builder_git_blob'],
+            'portfolio_blob':blob(portfolio)==auth['portfolio_git_blob'],
+            'frontier_blob':blob(frontier)==auth['frontier_git_blob'],
+            'live22_blob':blob(live22)==auth['live22_git_blob'],
+          }
+          if not all(checks.values()): raise SystemExit(f'source binding failure: {checks}')
+          live=json.loads(live22)
+          if live.get('accepted_explicit_unsat_cases')!=22 or live.get('residual_open_cases')!=expected or live.get('global_checkpoint')!='507/517':
+              raise SystemExit('live22 frontier mismatch')
+          fj=json.loads(frontier)
+          rows={entry.get('expected_case_id_from_payload') or entry.get('directory'):entry for entry in fj['open_cases']}
+          if case_id not in rows: raise SystemExit('case missing from original complete frontier')
+          source=rows[case_id]
+          for name,data in [
+            ('profile37_outside_degree_dual_bound_case.py',dual),
+            ('profile37_outside_degree_split_cnf.py',base),
+            ('profile37_dual_solver_portfolio.py',portfolio),
+            ('open-frontier-v1.json',frontier),
+            ('live22-checkpoint.json',live22),
+            ('input.json',raw),
+          ]:
+              (root/name).write_bytes(data)
+          case_meta={
+            'case_id':case_id,
+            'second_only':source['second_only'],
+            'neither':source['neither'],
+            'expected_base_cnf_sha256':source['cnf_sha256'],
+            'source_report_sha256':source['report_sha256'],
+          }
+          (root/'case-meta.json').write_text(json.dumps(case_meta,indent=2,sort_keys=True)+'\n')
+          receipt={
+            'schema':'profile37-dual8-source-recovery/v1','request_id':request,'case_id':case_id,
+            'checks':checks,'input_sha256':hashlib.sha256(raw).hexdigest(),
+            'live22_git_blob':auth['live22_git_blob'],'frontier_git_blob':auth['frontier_git_blob'],
+            'dual_bound_script_git_blob':auth['dual_bound_script_git_blob'],'base_builder_git_blob':auth['base_builder_git_blob'],
+            'portfolio_git_blob':auth['portfolio_git_blob'],**case_meta,
+          }
+          (root/'source-recovery-receipt.json').write_text(json.dumps(receipt,indent=2,sort_keys=True)+'\n')
+          PY
+          chmod +x /tmp/dual/profile37_dual_solver_portfolio.py
+          python -m py_compile /tmp/dual/*.py
+
+      - name: Build fixed Kissat and CaDiCaL
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/arminbiere/kissat.git /tmp/kissat >/dev/null 2>&1
+          git -C /tmp/kissat checkout 8af8e56f174b778aef3aa45af9f739b2a5f492c2 >/dev/null 2>&1
+          (cd /tmp/kissat && ./configure >/dev/null && make -j2 >/dev/null)
+          git clone https://github.com/arminbiere/cadical.git /tmp/cadical >/dev/null 2>&1
+          git -C /tmp/cadical checkout c60730422e758ef1cebe7aeddf2dda31c996bf04 >/dev/null 2>&1
+          (cd /tmp/cadical && ./configure >/dev/null && make -j2 >/dev/null)
+          git -C /tmp/kissat rev-parse HEAD > /tmp/result/kissat-source-commit.txt
+          /tmp/kissat/build/kissat --version > /tmp/result/kissat-version.txt
+          sha256sum /tmp/kissat/build/kissat > /tmp/result/kissat.sha256
+          git -C /tmp/cadical rev-parse HEAD > /tmp/result/cadical-source-commit.txt
+          /tmp/cadical/build/cadical --version > /tmp/result/cadical-version.txt
+          sha256sum /tmp/cadical/build/cadical > /tmp/result/cadical.sha256
+          sha256sum /tmp/dual/profile37_dual_solver_portfolio.py > /tmp/result/portfolio.sha256
+          sha256sum /tmp/dual/profile37_outside_degree_dual_bound_case.py > /tmp/result/dual-bound-script.sha256
+
+      - name: Smoke-test terminal portfolio behavior
+        shell: bash
+        run: |
+          set +e
+          printf 'p cnf 1 2\n1 0\n-1 0\n' > /tmp/portfolio-smoke.cnf
+          PORTFOLIO_KISSAT=/tmp/kissat/build/kissat PORTFOLIO_CADICAL=/tmp/cadical/build/cadical PORTFOLIO_TIMEOUT=60 \
+            /tmp/dual/profile37_dual_solver_portfolio.py /tmp/portfolio-smoke.cnf > /tmp/result/portfolio-smoke.log 2>&1
+          rc=$?
+          printf '%s\n' "$rc" > /tmp/result/portfolio-smoke-exit.txt
+          test "$rc" -eq 20
+          grep -q 'UNSATISFIABLE' /tmp/result/portfolio-smoke.log
+
+      - name: Execute one strengthened exact case
+        env:
+          CASE_ID: ${{ matrix.case_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PORTFOLIO_KISSAT=/tmp/kissat/build/kissat
+          export PORTFOLIO_CADICAL=/tmp/cadical/build/cadical
+          export PORTFOLIO_TIMEOUT=19200
+          python - <<'PY'
+          import json, os, pathlib, subprocess
+          root=pathlib.Path('/tmp/dual'); out=pathlib.Path('/tmp/result/exact'); out.mkdir(parents=True,exist_ok=True)
+          meta=json.loads((root/'case-meta.json').read_text())
+          cmd=[
+            'python',str(root/'profile37_outside_degree_dual_bound_case.py'),
+            '--inside','7,8,8,8,8,8,8,8,9','--t','4',
+            '--second-only',','.join(map(str,meta['second_only'])),
+            '--neither',','.join(map(str,meta['neither'])),
+            '--expected-case-id',meta['case_id'],
+            '--expected-base-cnf-sha256',meta['expected_base_cnf_sha256'],
+            '--source-report-sha256',meta['source_report_sha256'],
+            '--frontier-git-blob','d8407d78795835cbdfe80737cf7b646561af8b91',
+            '--solver',str(root/'profile37_dual_solver_portfolio.py'),
+            '--workdir',str(out),'--timeout','19500','--discard-cnf'
+          ]
+          with (pathlib.Path('/tmp/result')/'stdout.txt').open('w') as stdout, (pathlib.Path('/tmp/result')/'stderr.txt').open('w') as stderr:
+              proc=subprocess.run(cmd,stdout=stdout,stderr=stderr,text=True)
+          (pathlib.Path('/tmp/result')/'wrapper-return-code.txt').write_text(str(proc.returncode)+'\n')
+          for name in ['input.json','live22-checkpoint.json','case-meta.json','source-recovery-receipt.json']:
+              (pathlib.Path('/tmp/result')/name).write_bytes((root/name).read_bytes())
+          PY
+
+      - name: Store on unique private staging branch
+        if: always()
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          REQUEST_ID: 7a8f4d2e91c64b8aaf0357d12e6c9b44
+          CASE_ID: ${{ matrix.case_id }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, tarfile, time, urllib.error, urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; request=os.environ['REQUEST_ID']; case_id=os.environ['CASE_ID']; run=os.environ['RUN_ID']; attempt=os.environ['RUN_ATTEMPT']
+          repo='shengtenghou4-star/00'; branch=f'zal-dual8-stage-{run}-{attempt}-{case_id}'; root=pathlib.Path('/tmp/result')
+          stream=io.BytesIO()
+          with tarfile.open(fileobj=stream,mode='w:gz',format=tarfile.PAX_FORMAT) as tf:
+              for p in sorted(root.rglob('*')):
+                  if p.is_symlink(): raise SystemExit('unsafe result')
+                  tf.add(p,arcname=p.relative_to(root),recursive=False)
+          package=stream.getvalue()
+          if len(package)>90*1024*1024: raise SystemExit('result too large')
+          report_path=root/'exact'/'report.json'; status=None; exit_code=None; binding=False; dual_hash=None
+          if report_path.exists():
+              report=json.loads(report_path.read_text()); status=report.get('status'); exit_code=report.get('exit_code'); binding=report.get('binding_pass') is True; dual_hash=report.get('dual_cnf_sha256')
+          receipt={'schema':1,'request_id':request,'run_id':run,'run_attempt':attempt,'case_id':case_id,'staging_branch':branch,'solver_status':status,'solver_exit_code':exit_code,'binding_pass':binding,'dual_cnf_sha256':dual_hash,'result_bytes':len(package),'result_sha256':hashlib.sha256(package).hexdigest(),'finished_unix':int(time.time())}
+          headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'zal-dual8-stage'}
+          with urllib.request.urlopen(urllib.request.Request(f'https://api.github.com/repos/{repo}/git/ref/heads/results',headers=headers),timeout=120) as r: base=json.load(r)['object']['sha']
+          body=json.dumps({'ref':f'refs/heads/{branch}','sha':base}).encode()
+          try:
+              with urllib.request.urlopen(urllib.request.Request(f'https://api.github.com/repos/{repo}/git/refs',data=body,method='POST',headers=headers),timeout=120) as r: r.read()
+          except urllib.error.HTTPError as exc:
+              if exc.code!=422: raise
+          def put(path,data,message):
+              body=json.dumps({'message':message,'content':base64.b64encode(data).decode(),'branch':branch},separators=(',',':')).encode()
+              req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}',data=body,method='PUT',headers=headers)
+              with urllib.request.urlopen(req,timeout=300) as r: r.read()
+          prefix=f'relay/staging/{request}/{run}-{attempt}/{case_id}'
+          put(f'{prefix}/result.tar.gz',package,'Store ZAL dual8 strengthened staged case package')
+          put(f'{prefix}/receipt.json',(json.dumps(receipt,indent=2,sort_keys=True)+'\n').encode(),'Store ZAL dual8 strengthened staged case receipt')
+          print(json.dumps(receipt,sort_keys=True))
+          PY
+
+  merge:
+    if: always()
+    needs: execute
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Merge, adversarially validate and store final bundle
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          REQUEST_ID: 7a8f4d2e91c64b8aaf0357d12e6c9b44
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, re, tarfile, time, urllib.error, urllib.parse, urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; request=os.environ['REQUEST_ID']; run=os.environ['RUN_ID']; attempt=os.environ['RUN_ATTEMPT']; repo='shengtenghou4-star/00'
+          cases=['b_8_8_8_10__n_8_9_10','b_8_8_8_9__n_9_9_10','b_8_8_9_10__n_8_8_10','b_8_8_9_10__n_8_9_9','b_8_8_9_9__n_8_9_10','b_8_8_9_9__n_9_9_9','b_8_9_9_9__n_8_8_10','b_8_9_9_9__n_8_9_9']
+          headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'zal-dual8-merge'}
+          def fetch(path,ref):
+              q=urllib.parse.urlencode({'ref':ref})
+              req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}?{q}',headers=headers)
+              with urllib.request.urlopen(req,timeout=180) as r: env=json.load(r)
+              return base64.b64decode(env['content'])
+          rows=[]; missing=[]; failures=[]; packages={}
+          for case_id in cases:
+              branch=f'zal-dual8-stage-{run}-{attempt}-{case_id}'; prefix=f'relay/staging/{request}/{run}-{attempt}/{case_id}'
+              try:
+                  receipt_data=fetch(f'{prefix}/receipt.json',branch); package=fetch(f'{prefix}/result.tar.gz',branch)
+              except Exception:
+                  missing.append(case_id); continue
+              receipt=json.loads(receipt_data)
+              checks=[receipt.get('request_id')==request,receipt.get('run_id')==run,receipt.get('run_attempt')==attempt,receipt.get('case_id')==case_id,receipt.get('staging_branch')==branch,hashlib.sha256(package).hexdigest()==receipt.get('result_sha256')]
+              if not all(checks): failures.append(f'{case_id}:receipt_or_package'); continue
+              root=pathlib.Path('/tmp')/('zal-dual8-'+hashlib.sha256(case_id.encode()).hexdigest()[:12]); root.mkdir(exist_ok=True)
+              with tarfile.open(fileobj=io.BytesIO(package),mode='r:gz') as tf:
+                  for m in tf.getmembers():
+                      p=pathlib.Path(m.name)
+                      if p.is_absolute() or '..' in p.parts or m.issym() or m.islnk() or m.isdev(): raise SystemExit('unsafe package')
+                  tf.extractall(root,filter='data')
+              report_path=root/'exact'/'report.json'; log_path=root/'exact'/'solver.log'; recovery_path=root/'source-recovery-receipt.json'
+              if not all(p.exists() for p in [report_path,log_path,recovery_path]): failures.append(f'{case_id}:missing_bound_file'); continue
+              report=json.loads(report_path.read_text()); recovery=json.loads(recovery_path.read_text()); log=log_path.read_text(errors='replace')
+              binding=[
+                  report.get('schema')=='profile37-outside-degree-dual-bound-result/v1',report.get('case_id')==case_id,report.get('binding_pass') is True,
+                  report.get('frontier_git_blob')=='d8407d78795835cbdfe80737cf7b646561af8b91',
+                  report.get('base_cnf_sha256')==recovery.get('expected_base_cnf_sha256'),report.get('source_report_sha256')==recovery.get('source_report_sha256'),
+                  recovery.get('live22_git_blob')=='f18175c2d6df0bee5bc9d035c096951f8e64f660',recovery.get('dual_bound_script_git_blob')=='4459c6ddcbafe6b758465ae65bd174aabd068155',
+                  recovery.get('base_builder_git_blob')=='58e21a354e2c22dfa9f5404d6f7c048f5877ef4f',recovery.get('portfolio_git_blob')=='8fd9863e6af4e69ea851f808d94c80555bab2956',
+                  report.get('dual_bounds',{}).get('dual_column_pair_bound')==30,report.get('dual_bounds',{}).get('dual_column_star_bound')==240,
+                  report.get('dual_bounds',{}).get('dual_column_pair_families')==136,report.get('dual_bounds',{}).get('dual_column_star_families')==17,
+              ]
+              if not all(binding): failures.append(f'{case_id}:audit_binding'); continue
+              selected=None; match=re.search(r'^c portfolio-selected (kissat|cadical) ',log,re.M)
+              if match: selected=match.group(1)
+              status=report.get('status'); exit_code=report.get('exit_code')
+              terminal_unsat=status=='UNSAT' and exit_code==20 and selected in {'kissat','cadical'} and 'UNSATISFIABLE' in log
+              wa=report.get('witness_audit'); valid_sat=status=='SAT' and exit_code==10 and selected in {'kissat','cadical'} and isinstance(wa,dict) and wa and all(wa.values())
+              if status=='UNSAT' and not terminal_unsat: failures.append(f'{case_id}:invalid_unsat'); continue
+              if status=='SAT' and not valid_sat: failures.append(f'{case_id}:invalid_sat'); continue
+              provenance={}
+              for name in ['kissat-source-commit.txt','kissat-version.txt','kissat.sha256','cadical-source-commit.txt','cadical-version.txt','cadical.sha256','portfolio.sha256','dual-bound-script.sha256','portfolio-smoke-exit.txt']:
+                  p=root/name
+                  if not p.exists(): failures.append(f'{case_id}:missing_{name}')
+                  else: provenance[name]=p.read_text().strip()
+              rows.append({'case_id':case_id,'status':status,'exit_code':exit_code,'selected_solver':selected,'base_cnf_sha256':report.get('base_cnf_sha256'),'dual_cnf_sha256':report.get('dual_cnf_sha256'),'base_variables':report.get('base_variables'),'base_clauses':report.get('base_clauses'),'dual_variables':report.get('dual_variables'),'dual_clauses':report.get('dual_clauses'),'solve_seconds':report.get('solve_seconds'),'report_sha256':hashlib.sha256(report_path.read_bytes()).hexdigest(),'package_sha256':receipt.get('result_sha256'),'provenance':provenance})
+              packages[case_id]=package
+          ids=[r['case_id'] for r in rows]; duplicate=len(ids)!=len(set(ids)); unexpected=sorted(set(ids)-set(cases)); absent=sorted(set(cases)-set(ids))
+          unsat=sorted(r['case_id'] for r in rows if r['status']=='UNSAT' and r['exit_code']==20); sat=sorted(r['case_id'] for r in rows if r['status']=='SAT' and r['exit_code']==10); open_ids=sorted(set(cases)-set(unsat)-set(sat))
+          merged={'schema':'profile37-dual8-strengthened-merged-cover/v1','request_id':request,'run_id':run,'run_attempt':attempt,'mode':'t4:7,8,8,8|8,8,8,8,9','inside':[7,8,8,8,8,8,8,8,9],'expected_case_ids':cases,'received_case_ids':sorted(ids),'missing_stage_packages':missing,'missing_or_rejected_case_ids':absent,'duplicate_case':duplicate,'unexpected_case_ids':unexpected,'integrity_failures':failures,'accepted_before_run':22,'new_unsat_case_ids':unsat,'new_sat_case_ids':sat,'new_open_case_ids':open_ids,'accepted_total_if_audited':22+len(unsat),'sat_total':len(sat),'open_total_if_audited':len(open_ids),'rows':sorted(rows,key=lambda r:r['case_id']),'method':'bidirectional q=1/q=2 incidence-shadow strengthened CNF + fixed Kissat/CaDiCaL portfolio','candidate_verdict':'TERMINAL_UNSAT_CANDIDATE' if not failures and not absent and len(unsat)==8 and not sat else 'SAT_CANDIDATE' if sat else 'PARTIAL_OPEN'}
+          merged_raw=(json.dumps(merged,indent=2,sort_keys=True)+'\n').encode()
+          bundle=io.BytesIO()
+          with tarfile.open(fileobj=bundle,mode='w:gz',format=tarfile.PAX_FORMAT) as tf:
+              for case_id,package in sorted(packages.items()):
+                  info=tarfile.TarInfo(f'cases/{case_id}/result.tar.gz'); info.size=len(package); info.mtime=int(time.time()); tf.addfile(info,io.BytesIO(package))
+              info=tarfile.TarInfo('merged-cover.json'); info.size=len(merged_raw); info.mtime=int(time.time()); tf.addfile(info,io.BytesIO(merged_raw))
+          bundle_data=bundle.getvalue(); final_branch=f'zal-dual8-final-{run}-{attempt}'
+          with urllib.request.urlopen(urllib.request.Request(f'https://api.github.com/repos/{repo}/git/ref/heads/results',headers=headers),timeout=120) as r: base=json.load(r)['object']['sha']
+          body=json.dumps({'ref':f'refs/heads/{final_branch}','sha':base}).encode()
+          try:
+              with urllib.request.urlopen(urllib.request.Request(f'https://api.github.com/repos/{repo}/git/refs',data=body,method='POST',headers=headers),timeout=120) as r: r.read()
+          except urllib.error.HTTPError as exc:
+              if exc.code!=422: raise
+          receipt={'schema':1,'request_id':request,'run_id':run,'run_attempt':attempt,'final_branch':final_branch,'merged_cover_sha256':hashlib.sha256(merged_raw).hexdigest(),'bundle_sha256':hashlib.sha256(bundle_data).hexdigest(),'bundle_bytes':len(bundle_data),'candidate_verdict':merged['candidate_verdict'],'finished_unix':int(time.time())}
+          def put(path,data,message):
+              body=json.dumps({'message':message,'content':base64.b64encode(data).decode(),'branch':final_branch},separators=(',',':')).encode()
+              req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}',data=body,method='PUT',headers=headers)
+              with urllib.request.urlopen(req,timeout=300) as r: r.read()
+          prefix=f'relay/results/{request}/{run}-{attempt}'
+          put(f'{prefix}/combined.tar.gz',bundle_data,'Store ZAL dual8 strengthened combined package')
+          put(f'{prefix}/merged-cover.json',merged_raw,'Store ZAL dual8 strengthened merged cover')
+          put(f'{prefix}/merged-receipt.json',(json.dumps(receipt,indent=2,sort_keys=True)+'\n').encode(),'Store ZAL dual8 strengthened merged receipt')
+          print(json.dumps(receipt,sort_keys=True))
+          PY
