@@ -24,6 +24,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sha256sum tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/bio001_s42_acquire.py tools/s45_phaseA.py tools/s45_phaseA_audit.py
-          python -m py_compile tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/bio001_s42_acquire.py tools/s45_phaseA.py tools/s45_phaseA_audit.py
+          sha256sum tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/bio001_s42_acquire.py tools/s45_phaseA.py tools/s45_phaseA_portable.py tools/s45_phaseA_audit_portable.py
+          python -m py_compile tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/bio001_s42_acquire.py tools/s45_phaseA.py tools/s45_phaseA_portable.py tools/s45_phaseA_audit_portable.py
           echo S45_PORTABILITY_SOURCE_REFREEZE_PASS
