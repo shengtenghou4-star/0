@@ -29,11 +29,12 @@ jobs:
         run: |
           set -euo pipefail
           sha256sum tools/s44_pipeline.py.chunk0 tools/s44_pipeline.py.chunk1 tools/s44_pipeline.py.chunk2 tools/s44_pipeline.py.chunk3 tools/s44_audit.py
-          test "$(sha256sum tools/s44_pipeline.py.chunk0 | awk '{print $1}')" = "37dc08b7b52b0c882322ac11dc29ad7dd5ef96e108640140890c5351f2722d24"
-          test "$(sha256sum tools/s44_pipeline.py.chunk1 | awk '{print $1}')" = "797391ebf2fa9f45e5bc6093dcfa19016a2f21d68fe51b45d708968fb5d6fc08"
-          test "$(sha256sum tools/s44_pipeline.py.chunk2 | awk '{print $1}')" = "c20154d7c693b127f4e65589179b356b30a35d89b5902b7f039a1fb99617264a"
-          test "$(sha256sum tools/s44_pipeline.py.chunk3 | awk '{print $1}')" = "b6430971c5af8bdf15ea7361205219394219a11f5aa4a80b17469248f4564812"
+          test "$(sha256sum tools/s44_pipeline.py.chunk0 | awk '{print $1}')" = "60e373edce0c02da7f5eecef25bbdd1b13525705e24e60b1000fe959af38dbc2"
+          test "$(sha256sum tools/s44_pipeline.py.chunk1 | awk '{print $1}')" = "b33d9a1e696c119d3f406b6da1c390d56fd16df3b4b7489b10594d9ee0409030"
+          test "$(sha256sum tools/s44_pipeline.py.chunk2 | awk '{print $1}')" = "8b960a040ffb3c15721b7244156d8ff4142629f2eb84a4f003ddb87b7eed341b"
+          test "$(sha256sum tools/s44_pipeline.py.chunk3 | awk '{print $1}')" = "f55aa7b4cea6262db21f026da731f2673e05e633c8db0095d1772d71fa9a0977"
           cat tools/s44_pipeline.py.chunk0 tools/s44_pipeline.py.chunk1 tools/s44_pipeline.py.chunk2 tools/s44_pipeline.py.chunk3 > tools/s44_pipeline.py
+          sha256sum tools/s44_pipeline.py tools/s44_audit.py
           test "$(sha256sum tools/s44_pipeline.py | awk '{print $1}')" = "f8d11b16f911fe8982c9e8af2e07240eafcf536c47fb8e7fcd66b545c6a8bc34"
           test "$(sha256sum tools/s44_audit.py | awk '{print $1}')" = "69e0415305103b331a091c38e3b05ec119fd1a692f9b1ac3117a4d73b4e194b8"
           python -m py_compile tools/s42_canonical_reconstruction.py tools/s43_calcium_innovation.py tools/s44_pipeline.py tools/s44_audit.py tools/bio001_s42_acquire.py
