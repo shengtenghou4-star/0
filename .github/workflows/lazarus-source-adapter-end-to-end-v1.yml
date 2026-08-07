@@ -1,0 +1,167 @@
+name: LAZARUS source adapter end-to-end v1
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install frozen-science dependencies
+        run: python -m pip install 'numpy>=2.0' 'scipy>=1.13' 'scikit-learn>=1.5'
+      - name: Verify frozen source identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object lazarus-public-compute/catnap_source_adapter_v1.py)" = "e5a2e8d3afe36962c472eb66202b7faa06447655"
+          test "$(git hash-object lazarus-public-compute/lazarus_hiv/september_signed_utility_runner.py)" = "99a90061e11a9f16311216fe0fffee9f5534aefb"
+          test "$(git hash-object lazarus-public-compute/lazarus_hiv/signed_utility_router.py)" = "bfdb938b49f408d677b60c1d7499b75738026002"
+          test "$(sha256sum lazarus-public-compute/catnap_source_adapter_v1.py | awk '{print $1}')" = "96fc82ef56cbfce2fef67e40ada6234b47882b8d2f836649b7cf32111922ecc6"
+          test "$(sha256sum lazarus-public-compute/lazarus_hiv/september_signed_utility_runner.py | awk '{print $1}')" = "5eafe38b51e79aeccdb6c2982c4ff427dd0009e14f8cc560cf6334212703b1dd"
+          test "$(sha256sum lazarus-public-compute/lazarus_hiv/signed_utility_router.py | awk '{print $1}')" = "3e724f4c520537b84e960d3a14e915daadf13f79765bc2f316dddd2435466b22"
+      - name: Recover exact official July CATNAP snapshot
+        run: python cases/7838a640602a3a78463d52e06e2a614a/fetch_archive.py
+      - name: Execute zero-target end-to-end source preflight
+        env:
+          PYTHONPATH: lazarus-public-compute
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf e2e-source-preflight
+          mkdir -p e2e-source-preflight
+          python - <<'PY'
+          import json,sys
+          from pathlib import Path
+          from lazarus_hiv import september_signed_utility_runner as runner
+
+          adapter_path=Path('lazarus-public-compute/catnap_source_adapter_v1.py')
+          adapter_sha='96fc82ef56cbfce2fef67e40ada6234b47882b8d2f836649b7cf32111922ecc6'
+          data=Path('cases/7838a640602a3a78463d52e06e2a614a/artifacts/catnap-2026-07-01')
+          families=Path('lazarus-public-compute/frozen/primary_family_components_v1.csv')
+
+          supervised={'ridge':0,'router':0}
+          original_ridge_fit=runner.Ridge.fit
+          original_router_fit=runner.LogisticRegression.fit
+          def forbidden_ridge(self,*args,**kwargs):
+              supervised['ridge']+=1
+              raise AssertionError('supervised Ridge fit attempted during zero-target source preflight')
+          def forbidden_router(self,*args,**kwargs):
+              supervised['router']+=1
+              raise AssertionError('supervised router fit attempted during zero-target source preflight')
+          runner.Ridge.fit=forbidden_ridge
+          runner.LogisticRegression.fit=forbidden_router
+
+          adapter=runner.load_source_adapter(adapter_path,adapter_sha)
+          module=sys.modules['lazarus_september_source_adapter']
+          representation_fits={'count':0}
+          original_rep_fit=module.SequenceRepresentation.fit_transform
+          def counted_rep_fit(self,*args,**kwargs):
+              representation_fits['count']+=1
+              return original_rep_fit(self,*args,**kwargs)
+          module.SequenceRepresentation.fit_transform=counted_rep_fit
+          try:
+              training=adapter.build_training_design(data,families)
+          finally:
+              module.SequenceRepresentation.fit_transform=original_rep_fit
+              runner.Ridge.fit=original_ridge_fit
+              runner.LogisticRegression.fit=original_router_fit
+
+          training.validate(True)
+          if representation_fits['count'] != 4:
+              raise SystemExit(f'unsupervised representation fit count drift: {representation_fits}')
+          if supervised != {'ridge':0,'router':0}:
+              raise SystemExit(f'supervised fit attempted: {supervised}')
+          if len(training.row_id)!=63112:
+              raise SystemExit('training pair count drift')
+          if len(set(training.antibody_id.astype(str)))!=575 or len(set(training.virus_id.astype(str)))!=1507:
+              raise SystemExit('training entity count drift')
+          if len(set(training.antibody_family.astype(str)))!=228:
+              raise SystemExit('training family count drift')
+          if len(set(training.virus_cluster.astype(str)))!=1493:
+              raise SystemExit('virus sequence cluster count drift')
+          folds=runner.assign_group_folds(training.virus_cluster,training.row_id)
+          fold_counts={str(i):int((folds==i).sum()) for i in range(5)}
+          cluster_folds={}
+          for cluster,fold in zip(training.virus_cluster.astype(str),folds,strict=True):
+              prior=cluster_folds.setdefault(cluster,int(fold))
+              if prior!=int(fold):raise SystemExit('virus cluster leaked across folds')
+
+          output=Path('e2e-source-preflight/sealed-zero-target')
+          base=runner.zero_target_preflight(None,None,output)
+          duplicate_rejected=False
+          try:
+              runner.zero_target_preflight(None,None,output)
+          except FileExistsError:
+              duplicate_rejected=True
+          if not duplicate_rejected:raise SystemExit('duplicate output was not rejected')
+
+          stale_output=Path('e2e-source-preflight/stale-case')
+          stale_staging=stale_output.parent/f'.{stale_output.name}.staging'
+          stale_staging.mkdir()
+          stale_rejected=False
+          try:
+              runner.zero_target_preflight(None,None,stale_output)
+          except FileExistsError:
+              stale_rejected=True
+          if not stale_rejected:raise SystemExit('stale staging was not rejected')
+
+          receipt={
+            'schema_version':'1.0',
+            'formal_outcome':'COMPLETE_SOURCE_RUNNER_ZERO_TARGET_PREFLIGHT_PASS',
+            'adapter_sha256':adapter_sha,
+            'runner_sha256':'5eafe38b51e79aeccdb6c2982c4ff427dd0009e14f8cc560cf6334212703b1dd',
+            'signed_utility_component_sha256':'3e724f4c520537b84e960d3a14e915daadf13f79765bc2f316dddd2435466b22',
+            'training_pairs':len(training.row_id),
+            'training_antibodies':len(set(training.antibody_id.astype(str))),
+            'training_viruses':len(set(training.virus_id.astype(str))),
+            'training_families':len(set(training.antibody_family.astype(str))),
+            'virus_sequence_clusters':len(set(training.virus_cluster.astype(str))),
+            'fold_count':len(set(folds.tolist())),
+            'fold_row_counts':fold_counts,
+            'whole_cluster_oof_assignment':True,
+            'label_blind_unsupervised_representation_fits':representation_fits['count'],
+            'scientific_supervised_fits':0,
+            'expected_future_supervised_fit_budget':runner.EXPECTED_TOTAL_FITS,
+            'target_archive_path_received':False,
+            'august_target_bytes_read':0,
+            'september_target_bytes_read':0,
+            'target_members_listed':0,
+            'target_rows_read':0,
+            'target_values_read':0,
+            'duplicate_run_rejected':duplicate_rejected,
+            'stale_staging_rejected':stale_rejected,
+            'atomic_publication':bool(base['atomic_publication']),
+            'scientific_execution_authorized':False,
+          }
+          Path('e2e-source-preflight/COMPLETE_SOURCE_RUNNER_ZERO_TARGET_PREFLIGHT_RECEIPT.json').write_text(json.dumps(receipt,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(receipt,sort_keys=True))
+          PY
+      - name: Seal integration manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          root=Path('e2e-source-preflight')
+          files={}
+          for p in sorted(root.rglob('*')):
+              if p.is_file():files[str(p.relative_to(root))]={'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()}
+          manifest={'schema_version':'1.0','status':'SEALED','public_compute':True,'private_repository_bytes_read':0,'august_target_bytes_read':0,'september_target_bytes_read':0,'scientific_supervised_fits':0,'files':files}
+          (root/'COMPLETE_SOURCE_RUNNER_ZERO_TARGET_MANIFEST.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazarus-source-adapter-end-to-end-${{ github.run_id }}
+          path: e2e-source-preflight/
+          if-no-files-found: error
+          retention-days: 14
