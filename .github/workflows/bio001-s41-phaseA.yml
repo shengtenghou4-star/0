@@ -1,0 +1,69 @@
+name: BIO-001 S41 raw fluorescence recovery phase A
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  s41-phaseA:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install frozen runtime
+        run: python -m pip install "numpy==2.5.1" "scipy==1.17.0"
+
+      - name: Compile frozen scripts
+        run: python -m py_compile tools/bio001_s41_acquire.py tools/s41_phaseA_recovery.py tools/s41_phaseA_audit.py
+
+      - name: Acquire verified training archive only
+        run: |
+          set -euo pipefail
+          python tools/bio001_s41_acquire.py
+          mkdir -p s41_data/training
+          tar -xzf s41_artifacts/raw/AML310_moving.tar.gz -C s41_data/training
+
+      - name: Execute primary and exact rerun
+        run: |
+          set -euo pipefail
+          rm -rf s41_phaseA
+          python tools/s41_phaseA_recovery.py
+          mv s41_phaseA s41_phaseA_primary
+          python tools/s41_phaseA_recovery.py
+          mv s41_phaseA s41_phaseA_rerun
+
+      - name: Independent recovery and nonaccess audit
+        run: python tools/s41_phaseA_audit.py
+
+      - name: Package evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p s41_phaseA_evidence
+          cp tools/bio001_s41_acquire.py tools/s41_phaseA_recovery.py tools/s41_phaseA_audit.py s41_phaseA_evidence/ || true
+          cp s41_phaseA_primary/*.json s41_phaseA_evidence/ 2>/dev/null || true
+          cp s41_phaseA_rerun/*.json s41_phaseA_evidence/ 2>/dev/null || true
+          cp s41_phaseA_independent_audit.json s41_phaseA_evidence/ 2>/dev/null || true
+          cp s41_artifacts/source_manifest.json s41_phaseA_evidence/ 2>/dev/null || true
+          (cd s41_phaseA_evidence && sha256sum * > manifest.sha256)
+
+      - name: Upload S41 Phase A evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s41-raw-recovery-phaseA-evidence
+          path: s41_phaseA_evidence/
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: warn
