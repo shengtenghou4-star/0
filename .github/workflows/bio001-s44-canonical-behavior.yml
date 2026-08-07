@@ -28,6 +28,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sha256sum tools/s44_pipeline.py.chunk0 tools/s44_pipeline.py.chunk1 tools/s44_pipeline.py.chunk2 tools/s44_pipeline.py.chunk3 tools/s44_audit.py
           test "$(sha256sum tools/s44_pipeline.py.chunk0 | awk '{print $1}')" = "37dc08b7b52b0c882322ac11dc29ad7dd5ef96e108640140890c5351f2722d24"
           test "$(sha256sum tools/s44_pipeline.py.chunk1 | awk '{print $1}')" = "797391ebf2fa9f45e5bc6093dcfa19016a2f21d68fe51b45d708968fb5d6fc08"
           test "$(sha256sum tools/s44_pipeline.py.chunk2 | awk '{print $1}')" = "c20154d7c693b127f4e65589179b356b30a35d89b5902b7f039a1fb99617264a"
