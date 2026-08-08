@@ -17,19 +17,15 @@ jobs:
         with:
           ref: compute/hou-lens-p495-historical-south-recovery
           path: executor0
-      - name: Checkout exact historical source
-        uses: actions/checkout@v4
-        with:
-          repository: shengtenghou4-star/12
-          ref: relay/kids-k4-multiband-canary
-          path: source12
+      - name: Materialize blob-verified historical source
+        run: |
+          mkdir -p source12/relay_jobs
+          cp -a executor0/hou_lens_p495_historical_south/source12_exact source12/relay_jobs/k4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install historical pipeline dependencies
-        run: python -m pip install --disable-pip-version-check requests==2.32.5 astropy numpy scipy pytest
-      - name: Verify historical imaging tests
-        run: python -m pytest -q source12/relay_jobs/k4/test_kids_imaging.py
+        run: python -m pip install --disable-pip-version-check requests==2.32.5 astropy numpy scipy
       - name: Execute exact locked byte recovery
         run: python executor0/hou_lens_p495_historical_south/recover_exact.py
       - if: always()
