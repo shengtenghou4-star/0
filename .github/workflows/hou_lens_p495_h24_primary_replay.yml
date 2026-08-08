@@ -1,0 +1,39 @@
+name: HOU-LENS P4.9.5 H24 primary exact replay
+
+on:
+  pull_request:
+    branches:
+      - compute/hou-lens-p495-historical-south-recovery
+    paths:
+      - 'hou_lens_p495_h24_primary/**'
+      - '.github/workflows/hou_lens_p495_h24_primary_replay.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: compute/hou-lens-p495-h24-primary-replay
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.13'
+      - name: Install historical environment
+        run: python -m pip install --disable-pip-version-check requests==2.34.2 numpy==2.5.1 scipy==1.18.0 astropy==8.0.1
+      - name: Verify historical source blobs
+        run: |
+          test "$(git hash-object hou_lens_p495_historical_south/source12_exact/run_selected_target_pipeline.py)" = 'f72edeab83732ef1a05672d8d8e880dcb23c5e6d'
+          test "$(git hash-object hou_lens_p495_historical_south/source12_exact/kids_imaging.py)" = '583b5929c05f46d671228cbccc52af5709a2caa0'
+      - name: Replay six primary H24 positives
+        run: python hou_lens_p495_h24_primary/replay_exact.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hou-lens-p495-h24-primary-replay-evidence
+          path: p495_h24_primary_replay_evidence/
+          if-no-files-found: error
+          retention-days: 90
