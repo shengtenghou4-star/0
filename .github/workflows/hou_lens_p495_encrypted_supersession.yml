@@ -1,0 +1,148 @@
+name: HOU-LENS P4.9.5 encrypted acquisition supersession
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/hou_lens_p495_encrypted_supersession.yml'
+      - 'hou_lens_p495_supersession/executor/**'
+      - 'hou_lens_p495_supersession/launch.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  encrypted-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Checkout public executor
+        uses: actions/checkout@v4
+        with:
+          ref: compute/hou-lens-p495-encrypted-supersession
+          fetch-depth: 0
+
+      - name: Generate one-time runner recipient certificate
+        run: |
+          set -euo pipefail
+          mkdir -p runner_handshake
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out runner_handshake/runner-private-key.pem >/dev/null 2>&1
+          openssl req -new -x509 -key runner_handshake/runner-private-key.pem -out runner_handshake/runner-recipient-cert.pem -days 1 -subj '/CN=HOU-LENS-P4.9.5-Ephemeral-Runner/' >/dev/null 2>&1
+          sha256sum runner_handshake/runner-recipient-cert.pem | awk '{print $1}' > runner_handshake/runner-recipient-cert.sha256
+          printf '%s\n' "$GITHUB_RUN_ID" > runner_handshake/run_id.txt
+          printf '%s\n' "$GITHUB_SHA" > runner_handshake/trigger_sha.txt
+          printf '%s\n' 'ea77f181dca2174cbb85bd77ba5fd072e79b437572c2d69cce76abdcd747c4bc' > runner_handshake/expected_target_manifest.sha256
+
+      - name: Publish runner public handshake only
+        uses: actions/upload-artifact@v4
+        with:
+          name: hou-lens-p495-runner-public-handshake
+          path: |
+            runner_handshake/runner-recipient-cert.pem
+            runner_handshake/runner-recipient-cert.sha256
+            runner_handshake/run_id.txt
+            runner_handshake/trigger_sha.txt
+            runner_handshake/expected_target_manifest.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Wait for ciphertext addressed to this runner
+        run: |
+          set -euo pipefail
+          cert_sha=$(cat runner_handshake/runner-recipient-cert.sha256)
+          found=0
+          for i in $(seq 1 180); do
+            git fetch -q origin compute/hou-lens-p495-encrypted-supersession
+            if git cat-file -e origin/compute/hou-lens-p495-encrypted-supersession:hou_lens_p495_supersession/inbox/envelope.json 2>/dev/null && \
+               git cat-file -e origin/compute/hou-lens-p495-encrypted-supersession:hou_lens_p495_supersession/inbox/payload.cms.b64 2>/dev/null; then
+              git show origin/compute/hou-lens-p495-encrypted-supersession:hou_lens_p495_supersession/inbox/envelope.json > /tmp/envelope.json
+              addressed=$(python - <<'PY'
+          import json
+          print(json.load(open('/tmp/envelope.json')).get('runner_recipient_cert_sha256',''))
+          PY
+          )
+              if [ "$addressed" = "$cert_sha" ]; then
+                git show origin/compute/hou-lens-p495-encrypted-supersession:hou_lens_p495_supersession/inbox/payload.cms.b64 > /tmp/payload.cms.b64
+                found=1
+                break
+              fi
+            fi
+            sleep 10
+          done
+          [ "$found" = 1 ] || { echo 'No correctly addressed ciphertext arrived before relay deadline'; exit 20; }
+
+          python - <<'PY'
+          import hashlib,json,pathlib,sys
+          env=json.load(open('/tmp/envelope.json'))
+          cert_sha=pathlib.Path('runner_handshake/runner-recipient-cert.sha256').read_text().strip()
+          required={
+            'runner_recipient_cert_sha256':cert_sha,
+            'target_manifest_sha256':'ea77f181dca2174cbb85bd77ba5fd072e79b437572c2d69cce76abdcd747c4bc',
+            'h24_product_manifest_sha256':'9954d6f20a0f9280c0dd41f77775854660c6bc01327807878812105ba760b64b',
+            'result_recipient_cert_sha256':'37571101784b05edfcbb7e697685e1d6c69356c2c44c86a5c3a3158f6cccee16',
+          }
+          for k,v in required.items():
+              if env.get(k)!=v: raise SystemExit(f'envelope gate failed: {k}')
+          raw=pathlib.Path('/tmp/payload.cms.b64').read_bytes()
+          if hashlib.sha256(raw).hexdigest()!=env.get('payload_base64_sha256'): raise SystemExit('ciphertext base64 SHA gate failed')
+          PY
+          base64 -d /tmp/payload.cms.b64 > /tmp/payload.cms.der
+          cms_sha=$(sha256sum /tmp/payload.cms.der | awk '{print $1}')
+          expected_cms_sha=$(python -c "import json; print(json.load(open('/tmp/envelope.json'))['payload_cms_der_sha256'])")
+          [ "$cms_sha" = "$expected_cms_sha" ] || { echo 'ciphertext DER SHA gate failed'; exit 21; }
+
+          openssl cms -decrypt -binary -inform DER \
+            -recip runner_handshake/runner-recipient-cert.pem \
+            -inkey runner_handshake/runner-private-key.pem \
+            -in /tmp/payload.cms.der -out /tmp/private_payload.tar
+          mkdir -p private_input
+          tar -xf /tmp/private_payload.tar -C private_input
+          test -f private_input/P495_TARGETS.csv
+          test -f private_input/P495_H24_TILE_PRODUCT_MANIFEST.csv
+          test -f private_input/result-recipient-cert.pem
+          echo 'Encrypted payload decrypted and structural gates passed; private identities are not printed.'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.13'
+
+      - name: Install frozen acquisition dependencies
+        run: python -m pip install --disable-pip-version-check requests==2.32.5 numpy==2.5.1 astropy==8.0.1
+
+      - name: Execute exact 38-object raw-byte recovery
+        run: python hou_lens_p495_supersession/executor/acquire_exact.py
+
+      - name: Encrypt all private evidence before artifact upload
+        run: |
+          set -euo pipefail
+          tar -cf /tmp/private_result.tar private_result
+          openssl cms -encrypt -aes-256-cbc -binary -outform DER \
+            -in /tmp/private_result.tar \
+            -out public_result/encrypted_result.cms.der \
+            private_input/result-recipient-cert.pem
+          python - <<'PY'
+          import hashlib,json,pathlib
+          pre=pathlib.Path('public_result/public_summary.pre_encryption.json')
+          d=json.loads(pre.read_text())
+          enc=pathlib.Path('public_result/encrypted_result.cms.der')
+          h=hashlib.sha256(enc.read_bytes()).hexdigest()
+          d['encrypted_result_bytes']=enc.stat().st_size
+          d['encrypted_result_sha256']=h
+          d['result_recipient_cert_sha256']='37571101784b05edfcbb7e697685e1d6c69356c2c44c86a5c3a3158f6cccee16'
+          d['public_payload_contains_private_plaintext']=False
+          out=pathlib.Path('public_result/public_summary.json')
+          out.write_text(json.dumps(d,sort_keys=True,separators=(',',':'))+'\n')
+          pre.unlink()
+          print(json.dumps({k:d[k] for k in ['status','target_count','logical_request_count','successful_fits_count','complete_object_count','encrypted_result_bytes','encrypted_result_sha256']},indent=2))
+          PY
+          rm -rf private_input private_result /tmp/private_payload.tar /tmp/private_result.tar /tmp/payload.cms.der /tmp/payload.cms.b64 /tmp/envelope.json
+          rm -f runner_handshake/runner-private-key.pem
+
+      - if: always()
+        name: Upload ciphertext result and public summary only
+        uses: actions/upload-artifact@v4
+        with:
+          name: hou-lens-p495-encrypted-recovery-result
+          path: public_result/
+          if-no-files-found: warn
+          retention-days: 90
