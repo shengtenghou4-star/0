@@ -41,7 +41,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Wait for encrypted exact-ID request
+      - name: Wait for compressed encrypted exact-ID request
         run: |
           set -euo pipefail
           cert_sha=$(cat runner_handshake/cert.sha256)
@@ -49,17 +49,17 @@ jobs:
           for i in $(seq 1 180); do
             git fetch -q origin compute/hou-lens-control-coordinate-vizier-recovery
             ok=1
-            git cat-file -e origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/envelope.json 2>/dev/null || ok=0
-            for p in 000 001 002 003 004; do
-              git cat-file -e origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/payload.part-${p}.b64 2>/dev/null || ok=0
+            git cat-file -e origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/compressed-envelope.json 2>/dev/null || ok=0
+            for p in 000 001 002 003; do
+              git cat-file -e origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/compressed-payload.part-${p}.b64 2>/dev/null || ok=0
             done
             if [ "$ok" = 1 ]; then
-              git show origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/envelope.json > /tmp/env.json
+              git show origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/compressed-envelope.json > /tmp/env.json
               addressed=$(python -c "import json;print(json.load(open('/tmp/env.json')).get('runner_cert_sha256',''))")
               if [ "$addressed" = "$cert_sha" ]; then
                 : > /tmp/payload.b64
-                for p in 000 001 002 003 004; do
-                  git show origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/payload.part-${p}.b64 >> /tmp/payload.b64
+                for p in 000 001 002 003; do
+                  git show origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/compressed-payload.part-${p}.b64 >> /tmp/payload.b64
                 done
                 found=1
                 break
@@ -67,7 +67,7 @@ jobs:
             fi
             sleep 10
           done
-          [ "$found" = 1 ] || { echo 'No correctly addressed ciphertext arrived'; exit 20; }
+          [ "$found" = 1 ] || { echo 'No correctly addressed compressed ciphertext arrived'; exit 20; }
           python - <<'PY'
           import hashlib,json,pathlib
           e=json.load(open('/tmp/env.json')); raw=pathlib.Path('/tmp/payload.b64').read_bytes()
@@ -77,12 +77,13 @@ jobs:
           PY
           base64 -d /tmp/payload.b64 > /tmp/payload.der
           [ "$(sha256sum /tmp/payload.der | awk '{print $1}')" = "$(python -c "import json;print(json.load(open('/tmp/env.json'))['payload_der_sha256'])")" ] || exit 21
-          openssl cms -decrypt -binary -inform DER -recip runner_handshake/cert.pem -inkey runner_handshake/private.pem -in /tmp/payload.der -out /tmp/private_input.tar
+          openssl cms -decrypt -binary -inform DER -recip runner_handshake/cert.pem -inkey runner_handshake/private.pem -in /tmp/payload.der -out /tmp/private_input.tar.gz
+          [ "$(sha256sum /tmp/private_input.tar.gz | awk '{print $1}')" = "$(python -c "import json;print(json.load(open('/tmp/env.json'))['payload_targz_sha256'])")" ] || exit 22
           mkdir private_input
-          tar -xf /tmp/private_input.tar -C private_input
+          tar -xzf /tmp/private_input.tar.gz -C private_input
           test -f private_input/request.json
           test -f private_input/result-cert.pem
-          echo 'Encrypted exact-ID coordinate request decrypted; identifiers suppressed.'
+          echo 'Compressed encrypted exact-ID request decrypted; identifiers suppressed.'
 
       - uses: actions/setup-python@v5
         with:
@@ -97,8 +98,8 @@ jobs:
       - name: Encrypt private provenance result
         run: |
           set -euo pipefail
-          tar -cf /tmp/private_output.tar private_output
-          openssl cms -encrypt -aes-256-cbc -binary -outform DER -in /tmp/private_output.tar -out public_result/encrypted_coordinate_result.cms.der private_input/result-cert.pem
+          tar -czf /tmp/private_output.tar.gz private_output
+          openssl cms -encrypt -aes-256-cbc -binary -outform DER -in /tmp/private_output.tar.gz -out public_result/encrypted_coordinate_result.cms.der private_input/result-cert.pem
           python - <<'PY'
           import hashlib,json,pathlib
           pre=pathlib.Path('public_result/public_summary.pre_encryption.json')
@@ -112,7 +113,7 @@ jobs:
           pre.unlink()
           print(json.dumps({k:d[k] for k in ['status','request_count','recovered_count','batch_count','encrypted_result_bytes','encrypted_result_sha256']},indent=2))
           PY
-          rm -rf private_input private_output /tmp/private_input.tar /tmp/private_output.tar /tmp/payload.der /tmp/payload.b64 /tmp/env.json runner_handshake/private.pem
+          rm -rf private_input private_output /tmp/private_input.tar.gz /tmp/private_output.tar.gz /tmp/payload.der /tmp/payload.b64 /tmp/env.json runner_handshake/private.pem
 
       - if: always()
         uses: actions/upload-artifact@v4
