@@ -48,12 +48,19 @@ jobs:
           found=0
           for i in $(seq 1 180); do
             git fetch -q origin compute/hou-lens-control-coordinate-vizier-recovery
-            if git cat-file -e origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/envelope.json 2>/dev/null && \
-               git cat-file -e origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/payload.cms.b64 2>/dev/null; then
+            ok=1
+            git cat-file -e origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/envelope.json 2>/dev/null || ok=0
+            for p in 000 001 002 003 004; do
+              git cat-file -e origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/payload.part-${p}.b64 2>/dev/null || ok=0
+            done
+            if [ "$ok" = 1 ]; then
               git show origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/envelope.json > /tmp/env.json
               addressed=$(python -c "import json;print(json.load(open('/tmp/env.json')).get('runner_cert_sha256',''))")
               if [ "$addressed" = "$cert_sha" ]; then
-                git show origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/payload.cms.b64 > /tmp/payload.b64
+                : > /tmp/payload.b64
+                for p in 000 001 002 003 004; do
+                  git show origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/payload.part-${p}.b64 >> /tmp/payload.b64
+                done
                 found=1
                 break
               fi
