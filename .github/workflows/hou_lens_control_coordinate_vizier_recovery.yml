@@ -1,0 +1,116 @@
+name: HOU-LENS P4.9 encrypted control coordinate recovery
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/hou_lens_control_coordinate_vizier_recovery.yml'
+      - 'hou_lens_control_coord_recovery/**'
+      - 'hou_lens_control_coord_recovery_launch.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: compute/hou-lens-control-coordinate-vizier-recovery
+          fetch-depth: 0
+
+      - name: Generate one-time input recipient certificate
+        run: |
+          set -euo pipefail
+          mkdir -p runner_handshake
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out runner_handshake/private.pem >/dev/null 2>&1
+          openssl req -new -x509 -key runner_handshake/private.pem -out runner_handshake/cert.pem -days 1 -subj '/CN=HOU-LENS-P49-Control-Coordinate-Recovery/' >/dev/null 2>&1
+          sha256sum runner_handshake/cert.pem | awk '{print $1}' > runner_handshake/cert.sha256
+          echo '4297bff7452b20aac3ab203821bed0bb7fabdb08b37aefe44500bd3052d0e99e' > runner_handshake/expected_request.sha256
+
+      - name: Publish public handshake only
+        uses: actions/upload-artifact@v4
+        with:
+          name: hou-lens-control-coordinate-public-handshake
+          path: |
+            runner_handshake/cert.pem
+            runner_handshake/cert.sha256
+            runner_handshake/expected_request.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Wait for encrypted exact-ID request
+        run: |
+          set -euo pipefail
+          cert_sha=$(cat runner_handshake/cert.sha256)
+          found=0
+          for i in $(seq 1 180); do
+            git fetch -q origin compute/hou-lens-control-coordinate-vizier-recovery
+            if git cat-file -e origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/envelope.json 2>/dev/null && \
+               git cat-file -e origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/payload.cms.b64 2>/dev/null; then
+              git show origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/envelope.json > /tmp/env.json
+              addressed=$(python -c "import json;print(json.load(open('/tmp/env.json')).get('runner_cert_sha256',''))")
+              if [ "$addressed" = "$cert_sha" ]; then
+                git show origin/compute/hou-lens-control-coordinate-vizier-recovery:hou_lens_control_coord_inbox/payload.cms.b64 > /tmp/payload.b64
+                found=1
+                break
+              fi
+            fi
+            sleep 10
+          done
+          [ "$found" = 1 ] || { echo 'No correctly addressed ciphertext arrived'; exit 20; }
+          python - <<'PY'
+          import hashlib,json,pathlib
+          e=json.load(open('/tmp/env.json')); raw=pathlib.Path('/tmp/payload.b64').read_bytes()
+          if e.get('request_sha256')!='4297bff7452b20aac3ab203821bed0bb7fabdb08b37aefe44500bd3052d0e99e': raise SystemExit('request envelope gate failed')
+          if e.get('result_cert_sha256')!='16a6ffc5df2fc61289e506106dda702c157bc76261dd19a397efa6072b608625': raise SystemExit('result cert envelope gate failed')
+          if hashlib.sha256(raw).hexdigest()!=e.get('payload_base64_sha256'): raise SystemExit('payload base64 SHA gate failed')
+          PY
+          base64 -d /tmp/payload.b64 > /tmp/payload.der
+          [ "$(sha256sum /tmp/payload.der | awk '{print $1}')" = "$(python -c "import json;print(json.load(open('/tmp/env.json'))['payload_der_sha256'])")" ] || exit 21
+          openssl cms -decrypt -binary -inform DER -recip runner_handshake/cert.pem -inkey runner_handshake/private.pem -in /tmp/payload.der -out /tmp/private_input.tar
+          mkdir private_input
+          tar -xf /tmp/private_input.tar -C private_input
+          test -f private_input/request.json
+          test -f private_input/result-cert.pem
+          echo 'Encrypted exact-ID coordinate request decrypted; identifiers suppressed.'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install recovery dependency
+        run: python -m pip install --disable-pip-version-check requests==2.34.2
+
+      - name: Recover exact catalog coordinates
+        run: python hou_lens_control_coord_recovery/recover_exact.py
+
+      - name: Encrypt private provenance result
+        run: |
+          set -euo pipefail
+          tar -cf /tmp/private_output.tar private_output
+          openssl cms -encrypt -aes-256-cbc -binary -outform DER -in /tmp/private_output.tar -out public_result/encrypted_coordinate_result.cms.der private_input/result-cert.pem
+          python - <<'PY'
+          import hashlib,json,pathlib
+          pre=pathlib.Path('public_result/public_summary.pre_encryption.json')
+          d=json.loads(pre.read_text())
+          p=pathlib.Path('public_result/encrypted_coordinate_result.cms.der')
+          d['encrypted_result_bytes']=p.stat().st_size
+          d['encrypted_result_sha256']=hashlib.sha256(p.read_bytes()).hexdigest()
+          d['result_cert_sha256']='16a6ffc5df2fc61289e506106dda702c157bc76261dd19a397efa6072b608625'
+          d['public_payload_contains_private_plaintext']=False
+          pathlib.Path('public_result/public_summary.json').write_text(json.dumps(d,sort_keys=True,separators=(',',':'))+'\n')
+          pre.unlink()
+          print(json.dumps({k:d[k] for k in ['status','request_count','recovered_count','batch_count','encrypted_result_bytes','encrypted_result_sha256']},indent=2))
+          PY
+          rm -rf private_input private_output /tmp/private_input.tar /tmp/private_output.tar /tmp/payload.der /tmp/payload.b64 /tmp/env.json runner_handshake/private.pem
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hou-lens-control-coordinate-encrypted-result
+          path: public_result/
+          if-no-files-found: warn
+          retention-days: 90
