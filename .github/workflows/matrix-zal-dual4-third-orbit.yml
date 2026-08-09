@@ -1,0 +1,233 @@
+name: Matrix ZAL Dual4 Third Orbit Attack
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/matrix-zal-dual4-third-orbit.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: matrix-zal-dual4-third-orbit
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        case_id:
+          - b_8_8_9_10__n_8_9_9
+          - b_8_8_9_9__n_8_9_10
+          - b_8_9_9_9__n_8_8_10
+          - b_8_9_9_9__n_8_9_9
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Recover and bind frozen sources
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          REQUEST_ID: 7a8f31c4e9d24518b0a6f723d91e5c84
+          CASE_ID: ${{ matrix.case_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/zal /tmp/result
+          python - <<'PY'
+          import base64, hashlib, json, os, pathlib, urllib.parse, urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; request=os.environ['REQUEST_ID']; case_id=os.environ['CASE_ID']
+          repo='shengtenghou4-star/00'
+          headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'zal-third-orbit'}
+          def fetch(path,ref='main'):
+              q=urllib.parse.urlencode({'ref':ref})
+              req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}?{q}',headers=headers)
+              with urllib.request.urlopen(req,timeout=180) as r: env=json.load(r)
+              return base64.b64decode(env['content'])
+          def blob(data): return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          raw=fetch(f'relay/requests/{request}/input.json'); inp=json.loads(raw); auth=inp['authority']
+          if inp.get('schema')!='profile37-dual-third-orbit-request/v1' or inp.get('request_id')!=request: raise SystemExit('request identity failure')
+          expected=inp['residual_case_ids']
+          if case_id not in expected or len(expected)!=4 or len(set(expected))!=4: raise SystemExit('case set failure')
+          live=fetch(auth['live26_path']); orbit=fetch(auth['orbit_script_path']); runner=fetch(auth['cube_runner_path'])
+          base=fetch(auth['base_builder_path']); dual=fetch(auth['dual_builder_path']); frontier=fetch(auth['frontier_path'],auth['frontier_ref'])
+          checks={
+            'live26':blob(live)==auth['live26_git_blob'],
+            'orbit':blob(orbit)==auth['orbit_script_git_blob'],
+            'runner':blob(runner)==auth['cube_runner_git_blob'],
+            'base':blob(base)==auth['base_builder_git_blob'],
+            'dual':blob(dual)==auth['dual_builder_git_blob'],
+            'frontier':blob(frontier)==auth['frontier_git_blob'],
+          }
+          if not all(checks.values()): raise SystemExit(f'blob binding failure: {checks}')
+          livej=json.loads(live)
+          if livej.get('accepted_explicit_unsat_cases')!=26 or livej.get('residual_open_cases')!=expected or livej.get('global_checkpoint')!='507/517': raise SystemExit('live26 contract failure')
+          fj=json.loads(frontier)
+          rows={r.get('expected_case_id_from_payload') or r.get('directory'):r for r in fj['open_cases']}
+          if case_id not in rows: raise SystemExit('case absent from complete frontier')
+          src=rows[case_id]
+          root=pathlib.Path('/tmp/zal')
+          for name,data in [('profile37_outside_degree_split_cnf.py',base),('profile37_outside_degree_dual_bound_case.py',dual),('profile37_dual_third_orbit_cover.py',orbit),('cadical_assumption_cube_runner.cpp',runner),('live26-checkpoint.json',live),('open-frontier-v1.json',frontier),('input.json',raw)]:
+              (root/name).write_bytes(data)
+          meta={'case_id':case_id,'second_only':src['second_only'],'neither':src['neither'],'expected_base_cnf_sha256':src['cnf_sha256'],'source_report_sha256':src['report_sha256'],'source_checks':checks}
+          (root/'case-meta.json').write_text(json.dumps(meta,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({'case_id':case_id,'checks':checks,'base_cnf':src['cnf_sha256']},sort_keys=True))
+          PY
+          python -m py_compile /tmp/zal/*.py
+
+      - name: Build fixed CaDiCaL and assumption runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/arminbiere/cadical.git /tmp/cadical >/dev/null 2>&1
+          git -C /tmp/cadical checkout c60730422e758ef1cebe7aeddf2dda31c996bf04 >/dev/null 2>&1
+          (cd /tmp/cadical && ./configure >/dev/null && make -j2 >/dev/null)
+          g++ -O3 -std=c++17 /tmp/zal/cadical_assumption_cube_runner.cpp -I/tmp/cadical/src /tmp/cadical/build/libcadical.a -lpthread -o /tmp/zal/orbit-runner
+          git -C /tmp/cadical rev-parse HEAD > /tmp/result/cadical-source-commit.txt
+          /tmp/cadical/build/cadical --version > /tmp/result/cadical-version.txt
+          sha256sum /tmp/zal/orbit-runner > /tmp/result/orbit-runner.sha256
+          sha256sum /tmp/cadical/build/cadical > /tmp/result/cadical.sha256
+
+      - name: Build strengthened CNF and complete third-orbit cover
+        env:
+          CASE_ID: ${{ matrix.case_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, pathlib, subprocess
+          root=pathlib.Path('/tmp/zal'); out=pathlib.Path('/tmp/result'); meta=json.loads((root/'case-meta.json').read_text()); inp=json.loads((root/'input.json').read_text())
+          exact=out/'exact'; exact.mkdir(exist_ok=True)
+          cmd=['python',str(root/'profile37_outside_degree_dual_bound_case.py'),'--inside','7,8,8,8,8,8,8,8,9','--t','4','--second-only',','.join(map(str,meta['second_only'])),'--neither',','.join(map(str,meta['neither'])),'--expected-case-id',meta['case_id'],'--expected-base-cnf-sha256',meta['expected_base_cnf_sha256'],'--source-report-sha256',meta['source_report_sha256'],'--frontier-git-blob',inp['authority']['frontier_git_blob'],'--workdir',str(exact),'--build-only']
+          subprocess.run(cmd,check=True)
+          cover=out/'cover'; cover.mkdir(exist_ok=True)
+          subprocess.run(['python',str(root/'profile37_dual_third_orbit_cover.py'),'--second-only',','.join(map(str,meta['second_only'])),'--neither',','.join(map(str,meta['neither'])),'--expected-case-id',meta['case_id'],'--outdir',str(cover)],check=True)
+          manifest=json.loads((cover/'third-orbit-cover.json').read_text()); exp=inp['expected_third_orbit_counts'][meta['case_id']]
+          if manifest['stats']['raw_degree8_count_vectors']!=exp['raw'] or manifest['branch_count']!=exp['retained']: raise SystemExit('orbit count audit failure')
+          (out/'case-meta.json').write_bytes((root/'case-meta.json').read_bytes()); (out/'input.json').write_bytes((root/'input.json').read_bytes()); (out/'live26-checkpoint.json').write_bytes((root/'live26-checkpoint.json').read_bytes())
+          PY
+
+      - name: Execute incremental third-orbit cover
+        env:
+          CASE_ID: ${{ matrix.case_id }}
+        shell: bash
+        run: |
+          set +e
+          CONFLICT_LIMIT=$(python - <<'PY'
+          import json
+          print(json.load(open('/tmp/zal/input.json'))['solver']['conflict_limit_per_third_orbit'])
+          PY
+          )
+          /tmp/zal/orbit-runner /tmp/result/exact/dual-model.cnf /tmp/result/cover/third-orbit-tasks.txt "$CONFLICT_LIMIT" /tmp/result/orbit-results.tsv > /tmp/result/orbit-runner.log 2>&1
+          rc=$?
+          printf '%s\n' "$rc" > /tmp/result/orbit-runner-exit.txt
+          python - <<'PY'
+          import hashlib,json,os,pathlib
+          root=pathlib.Path('/tmp/result'); case=os.environ['CASE_ID']; inp=json.loads((root/'input.json').read_text()); meta=json.loads((root/'case-meta.json').read_text()); cover=json.loads((root/'cover'/'third-orbit-cover.json').read_text()); exact=json.loads((root/'exact'/'report.json').read_text())
+          rows=[]
+          p=root/'orbit-results.tsv'
+          if p.exists():
+              lines=p.read_text().splitlines()
+              for line in lines[1:]:
+                  if not line.strip(): continue
+                  i,status,seconds,nass=line.split('\t'); rows.append({'id':int(i),'status':status,'seconds':float(seconds),'assumptions':int(nass)})
+          counts={s:sum(r['status']==s for r in rows) for s in ['UNSAT','SAT','UNKNOWN']}
+          expected=cover['branch_count']; complete=len(rows)==expected
+          verdict='UNSAT' if complete and counts['UNSAT']==expected else 'SAT_CANDIDATE' if counts['SAT'] else 'OPEN'
+          summary={'schema':'profile37-dual-third-orbit-result/v1','request_id':inp['request_id'],'case_id':case,'row_degrees':exact['row_degrees'],'source_base_cnf_sha256':meta['expected_base_cnf_sha256'],'rebuilt_base_cnf_sha256':exact['base_cnf_sha256'],'dual_cnf_sha256':exact['dual_cnf_sha256'],'binding_pass':exact['binding_pass'] is True and exact['base_cnf_sha256']==meta['expected_base_cnf_sha256'],'orbit_script_git_blob':inp['authority']['orbit_script_git_blob'],'cube_runner_git_blob':inp['authority']['cube_runner_git_blob'],'live26_git_blob':inp['authority']['live26_git_blob'],'frontier_git_blob':inp['authority']['frontier_git_blob'],'cover_sha256':hashlib.sha256((root/'cover'/'third-orbit-cover.json').read_bytes()).hexdigest(),'tasks_sha256':hashlib.sha256((root/'cover'/'third-orbit-tasks.txt').read_bytes()).hexdigest(),'expected_branches':expected,'completed_branches':len(rows),'status_counts':counts,'runner_exit_code':int((root/'orbit-runner-exit.txt').read_text()),'conflict_limit':inp['solver']['conflict_limit_per_third_orbit'],'class_verdict':verdict,'sat_witness_files':sorted(x.name for x in root.glob('orbit-results.tsv.sat.*'))}
+          (root/'summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(summary,sort_keys=True))
+          PY
+          exit 0
+
+      - name: Store case evidence on private staging branch
+        if: always()
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          REQUEST_ID: 7a8f31c4e9d24518b0a6f723d91e5c84
+          CASE_ID: ${{ matrix.case_id }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64,hashlib,json,os,pathlib,urllib.error,urllib.request
+          token=os.environ['LAB_QUEUE_TOKEN']; request=os.environ['REQUEST_ID']; case=os.environ['CASE_ID']; run=os.environ['RUN_ID']; attempt=os.environ['RUN_ATTEMPT']; repo='shengtenghou4-star/00'; root=pathlib.Path('/tmp/result')
+          branch=f'zal-third-orbit-stage-{run}-{attempt}-{case}'; headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'zal-third-stage'}
+          with urllib.request.urlopen(urllib.request.Request(f'https://api.github.com/repos/{repo}/git/ref/heads/results',headers=headers),timeout=120) as r: base=json.load(r)['object']['sha']
+          body=json.dumps({'ref':f'refs/heads/{branch}','sha':base}).encode()
+          try:
+              urllib.request.urlopen(urllib.request.Request(f'https://api.github.com/repos/{repo}/git/refs',data=body,method='POST',headers=headers),timeout=120).read()
+          except urllib.error.HTTPError as exc:
+              if exc.code!=422: raise
+          def put(path,data,msg):
+              body=json.dumps({'message':msg,'content':base64.b64encode(data).decode(),'branch':branch},separators=(',',':')).encode(); req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}',data=body,method='PUT',headers=headers); urllib.request.urlopen(req,timeout=300).read()
+          prefix=f'relay/staging/{request}/{run}-{attempt}/{case}'
+          required=['summary.json','orbit-results.tsv','orbit-runner-exit.txt','cadical-source-commit.txt','cadical-version.txt','cadical.sha256','orbit-runner.sha256']
+          for rel in required:
+              p=root/rel
+              if p.exists(): put(f'{prefix}/{rel}',p.read_bytes(),f'Store ZAL third-orbit {case} {rel}')
+          for rel in ['cover/third-orbit-cover.json','cover/third-orbit-cover.sha256','cover/third-orbit-tasks.sha256','exact/report.json','case-meta.json']:
+              p=root/rel
+              if p.exists(): put(f'{prefix}/{rel}',p.read_bytes(),f'Store ZAL third-orbit {case} {rel}')
+          receipt={'schema':1,'request_id':request,'run_id':run,'run_attempt':attempt,'case_id':case,'staging_branch':branch,'summary_sha256':hashlib.sha256((root/'summary.json').read_bytes()).hexdigest() if (root/'summary.json').exists() else None}
+          put(f'{prefix}/receipt.json',(json.dumps(receipt,indent=2,sort_keys=True)+'\n').encode(),f'Store ZAL third-orbit {case} receipt')
+          print(json.dumps(receipt,sort_keys=True))
+          PY
+
+  merge:
+    if: always()
+    needs: execute
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Merge and store audited cover
+        env:
+          LAB_QUEUE_TOKEN: ${{ secrets.LAB_QUEUE_TOKEN }}
+          REQUEST_ID: 7a8f31c4e9d24518b0a6f723d91e5c84
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64,hashlib,json,os,urllib.error,urllib.parse,urllib.request,time
+          token=os.environ['LAB_QUEUE_TOKEN']; request=os.environ['REQUEST_ID']; run=os.environ['RUN_ID']; attempt=os.environ['RUN_ATTEMPT']; repo='shengtenghou4-star/00'
+          cases=['b_8_8_9_10__n_8_9_9','b_8_8_9_9__n_8_9_10','b_8_9_9_9__n_8_8_10','b_8_9_9_9__n_8_9_9']
+          headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28','User-Agent':'zal-third-merge'}
+          def fetch(path,ref):
+              q=urllib.parse.urlencode({'ref':ref}); req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}?{q}',headers=headers)
+              with urllib.request.urlopen(req,timeout=180) as r: env=json.load(r)
+              return base64.b64decode(env['content'])
+          inp=json.loads(fetch(f'relay/requests/{request}/input.json','main')); summaries=[]; missing=[]; failures=[]
+          for case in cases:
+              branch=f'zal-third-orbit-stage-{run}-{attempt}-{case}'; prefix=f'relay/staging/{request}/{run}-{attempt}/{case}'
+              try: raw=fetch(f'{prefix}/summary.json',branch); receipt=json.loads(fetch(f'{prefix}/receipt.json',branch))
+              except Exception: missing.append(case); continue
+              summary=json.loads(raw)
+              checks=[summary.get('request_id')==request,summary.get('case_id')==case,summary.get('binding_pass') is True,summary.get('orbit_script_git_blob')==inp['authority']['orbit_script_git_blob'],summary.get('cube_runner_git_blob')==inp['authority']['cube_runner_git_blob'],summary.get('live26_git_blob')==inp['authority']['live26_git_blob'],summary.get('frontier_git_blob')==inp['authority']['frontier_git_blob'],receipt.get('summary_sha256')==hashlib.sha256(raw).hexdigest()]
+              if not all(checks): failures.append(case); continue
+              if summary.get('class_verdict')=='UNSAT' and not (summary.get('completed_branches')==summary.get('expected_branches') and summary.get('status_counts',{}).get('UNSAT')==summary.get('expected_branches') and summary.get('status_counts',{}).get('SAT')==0 and summary.get('status_counts',{}).get('UNKNOWN')==0 and summary.get('runner_exit_code')==20): failures.append(case); continue
+              summaries.append(summary)
+          unsat=sorted(s['case_id'] for s in summaries if s['class_verdict']=='UNSAT'); sat=sorted(s['case_id'] for s in summaries if s['class_verdict']=='SAT_CANDIDATE'); open_ids=sorted(set(cases)-set(unsat)-set(sat))
+          merged={'schema':'profile37-dual-third-orbit-merged-cover/v1','request_id':request,'run_id':run,'run_attempt':attempt,'expected_case_ids':cases,'received_case_ids':sorted(s['case_id'] for s in summaries),'missing_case_ids':missing,'integrity_failures':failures,'accepted_before_run':26,'new_unsat_case_ids':unsat,'new_sat_candidate_case_ids':sat,'new_open_case_ids':open_ids,'accepted_total_if_audited':26+len(unsat),'open_total_if_audited':len(open_ids),'summaries':sorted(summaries,key=lambda x:x['case_id']),'candidate_verdict':'TERMINAL_UNSAT_CANDIDATE' if len(unsat)==4 and not sat and not missing and not failures else 'SAT_CANDIDATE' if sat else 'PARTIAL_OPEN'}
+          raw=(json.dumps(merged,indent=2,sort_keys=True)+'\n').encode(); final=f'zal-third-orbit-final-{run}-{attempt}'
+          with urllib.request.urlopen(urllib.request.Request(f'https://api.github.com/repos/{repo}/git/ref/heads/results',headers=headers),timeout=120) as r: base=json.load(r)['object']['sha']
+          body=json.dumps({'ref':f'refs/heads/{final}','sha':base}).encode()
+          try: urllib.request.urlopen(urllib.request.Request(f'https://api.github.com/repos/{repo}/git/refs',data=body,method='POST',headers=headers),timeout=120).read()
+          except urllib.error.HTTPError as exc:
+              if exc.code!=422: raise
+          def put(path,data,msg):
+              body=json.dumps({'message':msg,'content':base64.b64encode(data).decode(),'branch':final},separators=(',',':')).encode(); req=urllib.request.Request(f'https://api.github.com/repos/{repo}/contents/{path}',data=body,method='PUT',headers=headers); urllib.request.urlopen(req,timeout=300).read()
+          prefix=f'relay/results/{request}/{run}-{attempt}'; put(f'{prefix}/merged-cover.json',raw,'Store ZAL third-orbit merged cover')
+          receipt={'schema':1,'request_id':request,'run_id':run,'run_attempt':attempt,'final_branch':final,'merged_cover_sha256':hashlib.sha256(raw).hexdigest(),'candidate_verdict':merged['candidate_verdict'],'finished_unix':int(time.time())}
+          put(f'{prefix}/merged-receipt.json',(json.dumps(receipt,indent=2,sort_keys=True)+'\n').encode(),'Store ZAL third-orbit merged receipt')
+          print(json.dumps(receipt,sort_keys=True))
+          PY
