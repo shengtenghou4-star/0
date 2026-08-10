@@ -1,0 +1,1 @@
+Run the frozen case through execute.py using the public Dryad web session transport. No model, split, alpha grid, gate, or holdout rule changed.
