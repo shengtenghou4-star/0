@@ -1,0 +1,198 @@
+name: BIO-001 S48 formal Dryad raw trajectory validation
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  s48-formal:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 1
+
+      - name: Guard against completed formal result
+        id: guard
+        shell: bash
+        run: |
+          if [ -f s48_frozen_target/formal_result_summary.json ]; then
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.guard.outputs.skip == 'false'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install frozen runtime
+        if: steps.guard.outputs.skip == 'false'
+        run: python -m pip install "numpy==2.5.1" "scipy==1.17.0"
+
+      - name: Verify frozen public executables and target manifest
+        if: steps.guard.outputs.skip == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f s48_frozen_target/archive_manifest.json
+          test -f s48_frozen_target/archive_manifest.names.txt
+          test "$(sha256sum tools/s48_target_common.py | awk '{print $1}')" = "f9688110a01110308335849141762716b368c8ce7e1a5eac6ff606b7d0fbd459"
+          test "$(sha256sum tools/s48_score.py | awk '{print $1}')" = "83ad4b5e4f999c595947513821513b8eb4e545a8e9490275787438caf9536188"
+          test "$(sha256sum tools/s48_audit.py | awk '{print $1}')" = "82bd01286ffdc8c7709d174ae2fd3ca04b39827da91f22d07834a746425ae0f3"
+          test "$(sha256sum tools/s48_archive_inventory.py | awk '{print $1}')" = "63230a4370f7efc3e6f6f8738f0d87dba22cb53431627cb73a03c80cb9596e0c"
+          python -m py_compile tools/s48_target_common.py tools/s48_score.py tools/s48_audit.py tools/s48_archive_inventory.py
+
+      - name: Reacquire exact frozen Dryad archive
+        if: steps.guard.outputs.skip == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p s48_target
+          curl -L --fail --retry 3 --retry-all-errors --connect-timeout 30 -A 'Mozilla/5.0' -o s48_target/dryad.zip 'https://datadryad.org/downloads/file_stream/2876840'
+          python tools/s48_archive_inventory.py s48_target/dryad.zip s48_target/current_manifest.json
+
+      - name: Verify current archive equals frozen manifest
+        if: steps.guard.outputs.skip == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          frozen=json.loads(Path('s48_frozen_target/archive_manifest.json').read_text())
+          current=json.loads(Path('s48_target/current_manifest.json').read_text())
+          keys=['bytes','sha256','zip_members','included_txt_metadata','included_crawl_txt','included_swim_txt']
+          for k in keys:
+              if current[k] != frozen[k]:
+                  raise SystemExit(f'FROZEN_ARCHIVE_MISMATCH {k}: {current[k]!r} != {frozen[k]!r}')
+          assert frozen['numeric_members_extracted'] is False and frozen['numeric_members_opened'] is False
+          assert current['numeric_members_extracted'] is False and current['numeric_members_opened'] is False
+          assert frozen['included_crawl_txt'] > 0 and frozen['included_swim_txt'] > 0
+          print(json.dumps({k:frozen[k] for k in ('bytes','sha256','zip_members','included_crawl_txt','included_swim_txt')},sort_keys=True))
+          PY
+
+      - name: Extract only preregistered adult N2 gait files
+        if: steps.guard.outputs.skip == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, zipfile
+          from pathlib import Path
+          m=json.loads(Path('s48_frozen_target/archive_manifest.json').read_text())
+          root=Path('s48_target/extracted'); root.mkdir(parents=True,exist_ok=True)
+          with zipfile.ZipFile('s48_target/dryad.zip','r') as z:
+              allowed={q['path'] for q in m['included_txt_metadata']}
+              for name in sorted(allowed):
+                  z.extract(name,root)
+          extracted=sorted(str(p.relative_to(root)) for p in root.rglob('*.txt'))
+          if extracted != sorted(allowed):
+              raise SystemExit('EXTRACTED_MEMBER_SET_MISMATCH')
+          print(f'extracted_allowed_txt={len(extracted)}')
+          PY
+
+      - name: Execute frozen scorer primary and exact rerun
+        if: steps.guard.outputs.skip == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp s48_frozen_target/archive_manifest.json s48_target/archive_manifest.json
+          rm -rf s48_output
+          python tools/s48_score.py
+          mv s48_output s48_primary
+          python tools/s48_score.py
+          mv s48_output s48_rerun
+
+      - name: Independent raw parser endpoint and scoring audit
+        if: steps.guard.outputs.skip == 'false'
+        run: python tools/s48_audit.py
+
+      - name: Package evidence without raw target data
+        if: steps.guard.outputs.skip == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p s48_evidence
+          cp tools/s48_target_common.py tools/s48_score.py tools/s48_audit.py tools/s48_archive_inventory.py s48_evidence/
+          cp s48_frozen_target/archive_manifest.json s48_frozen_target/archive_manifest.names.txt s48_evidence/
+          cp s48_primary/*.json s48_rerun/*.json s48_independent_audit.json s48_evidence/
+          cp s48_target/current_manifest.json s48_evidence/current_manifest.json
+          (cd s48_evidence && sha256sum * > manifest.sha256)
+          test ! -e s48_evidence/dryad.zip
+          test -z "$(find s48_evidence -name '*.txt' ! -name 'archive_manifest.names.txt' -print -quit)"
+
+      - name: Upload S48 formal evidence
+        if: steps.guard.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bio001-s48-independent-dryad-trajectory-evidence
+          path: s48_evidence/
+          compression-level: 9
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Generate metadata-only formal result summary
+        if: steps.guard.outputs.skip == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          def sha(p):
+              h=hashlib.sha256();
+              with Path(p).open('rb') as f:
+                  for b in iter(lambda:f.read(1024*1024),b''): h.update(b)
+              return h.hexdigest()
+          r=json.loads(Path('s48_primary/s48_result.json').read_text())
+          a=json.loads(Path('s48_independent_audit.json').read_text())
+          m=json.loads(Path('s48_frozen_target/archive_manifest.json').read_text())
+          summary={
+            'schema':'bio-001-s48-formal-result-summary-v1',
+            'validation_label':r['validation_label'],
+            'archive':{'bytes':m['bytes'],'sha256':m['sha256'],'zip_members':m['zip_members'],'included_crawl_txt':m['included_crawl_txt'],'included_swim_txt':m['included_swim_txt']},
+            'targets':{k:{'crawl_n':v['crawl_n'],'swim_n':v['swim_n'],'crawl_median':v['crawl_median'],'swim_median':v['swim_median'],'target_swim_to_crawl_ratio':v['target_swim_to_crawl_ratio'],'ratio_95ci':v['ratio_95ci'],'eligible':v['eligible']} for k,v in r['targets'].items()},
+            'frozen_model_ratios':r['frozen_model_ratios'],
+            'scores':r['scores'],
+            'eligible_endpoints':r['eligible_endpoints'],
+            'positive_credit_endpoints':r['positive_credit_endpoints'],
+            'no_endpoint_degradation_gt_25pct':r['no_endpoint_degradation_gt_25pct'],
+            'total_CeRSI_credit':r['total_CeRSI_credit'],
+            'CeRSI_v2_previous':r['CeRSI_v2_previous'],
+            'CeRSI_v2_current':r['CeRSI_v2_current'],
+            'exact_rerun':'PASS',
+            'independent_audit_status':a['status'],
+            'result_sha256':sha('s48_primary/s48_result.json'),
+            'receipt_sha256':sha('s48_primary/s48_run_receipt.json'),
+            'audit_sha256':sha('s48_independent_audit.json'),
+            'neural_branch_accessed':False,
+            'AML310_transition_accessed':False,
+            'AML32_chip_opened':False
+          }
+          out=Path('s48_frozen_target/formal_result_summary.json'); out.write_text(json.dumps(summary,indent=2,sort_keys=True,allow_nan=False),encoding='utf-8')
+          marker=Path('s48_frozen_target')/('RESULT_'+r['validation_label'])
+          marker.write_text(r['validation_label']+'\n',encoding='utf-8')
+          print(json.dumps({'label':r['validation_label'],'credit':r['total_CeRSI_credit'],'new_CeRSI':r['CeRSI_v2_current']},sort_keys=True))
+          PY
+
+      - name: Commit metadata-only formal summary
+        if: steps.guard.outputs.skip == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add s48_frozen_target/formal_result_summary.json s48_frozen_target/RESULT_*
+          git diff --cached --quiet && exit 0
+          git commit -m 'BIO-001 S48 publish formal trajectory validation summary [skip ci]'
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
