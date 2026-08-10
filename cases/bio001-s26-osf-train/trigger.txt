@@ -1,0 +1,6 @@
+BIO-001 S26 animal-level model training.
+Preregistration: 2200444ea0e43069597da277ed7a6378b7bdea67.
+Feature amendment: 596318171b14b3998b8fceb46384399e799952c4.
+Missing-neuron amendment: 520308336f63826bfdcbe1d95a2da4a8d667bfd8.
+Train recordings: six; development recordings: two; holdout recordings remain unextracted.
+Attempt 2: exclude only prefix-nonfinite neural channels under frozen minimum-retention gates.
