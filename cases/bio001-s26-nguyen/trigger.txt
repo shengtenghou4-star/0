@@ -1,0 +1,5 @@
+BIO-001 S26 Nguyen training/development source acquisition.
+Allowed source files: sd02-sd10 only.
+Forbidden before model freeze: sd11-sd13.
+Preregistration commit: a4d1e103606eb26344455f49db8c0324d95549ae.
+Attempt 6 transport: headless Chromium executes PMC proof-of-work challenge.
