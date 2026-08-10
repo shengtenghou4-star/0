@@ -1,4 +1,4 @@
-name: HOU-LENS P4.9.2 mixed16 encrypted exact replay
+name: HOU-LENS P4.9.8 mixed16 encrypted exact replay
 
 on:
   pull_request:
@@ -27,14 +27,14 @@ jobs:
           set -euo pipefail
           mkdir -p runner_handshake
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out runner_handshake/private.pem >/dev/null 2>&1
-          openssl req -new -x509 -key runner_handshake/private.pem -out runner_handshake/cert.pem -days 1 -subj '/CN=HOU-LENS-P492-Mixed16-Ephemeral/' >/dev/null 2>&1
+          openssl req -new -x509 -key runner_handshake/private.pem -out runner_handshake/cert.pem -days 1 -subj '/CN=HOU-LENS-P498-Mixed16-Ephemeral/' >/dev/null 2>&1
           sha256sum runner_handshake/cert.pem | awk '{print $1}' > runner_handshake/cert.sha256
-          echo 'ee41c5312b2a6918b0241acbe235970f825e6b5712af392be85dafce9cf524ef' > runner_handshake/expected_manifest.sha256
+          echo 'f55c4796b20a363702a05045fc835daebc81072f9c3b299ef461ea77fea35d5b' > runner_handshake/expected_manifest.sha256
 
       - name: Publish public handshake only
         uses: actions/upload-artifact@v4
         with:
-          name: hou-lens-p492-mixed16-public-handshake
+          name: hou-lens-p498-mixed16-public-handshake
           path: |
             runner_handshake/cert.pem
             runner_handshake/cert.sha256
@@ -65,8 +65,8 @@ jobs:
           python - <<'PY'
           import hashlib,json,pathlib
           e=json.load(open('/tmp/env.json')); raw=pathlib.Path('/tmp/payload.b64').read_bytes()
-          if e.get('manifest_sha256')!='ee41c5312b2a6918b0241acbe235970f825e6b5712af392be85dafce9cf524ef': raise SystemExit('manifest envelope gate failed')
-          if e.get('result_cert_sha256')!='151e539be07262be6d6c4abd0776d791db10b73521b5daf1c408d71b3b3865e1': raise SystemExit('result cert envelope gate failed')
+          if e.get('manifest_sha256')!='f55c4796b20a363702a05045fc835daebc81072f9c3b299ef461ea77fea35d5b': raise SystemExit('manifest envelope gate failed')
+          if e.get('result_cert_sha256')!='3074cc6af3830060533d58d0f3b6aefc4c2d1dfaac4f257e2ab0590a8033b7e5': raise SystemExit('result cert envelope gate failed')
           if hashlib.sha256(raw).hexdigest()!=e.get('payload_base64_sha256'): raise SystemExit('payload base64 SHA gate failed')
           PY
           base64 -d /tmp/payload.b64 > /tmp/payload.der
@@ -76,7 +76,7 @@ jobs:
           tar -xf /tmp/private_input.tar -C private_input
           test -f private_input/P492_MIXED16_EXACT_REPLAY_MANIFEST.json
           test -f private_input/result-recipient-cert.pem
-          echo 'Encrypted P4.9.2 manifest decrypted; private identities suppressed.'
+          echo 'Encrypted P4.9.8 mixed16 manifest decrypted; private identities suppressed.'
 
       - uses: actions/setup-python@v5
         with:
@@ -91,7 +91,7 @@ jobs:
           test "$(git hash-object hou_lens_p495_historical_south/source12_exact/kids_imaging.py)" = '583b5929c05f46d671228cbccc52af5709a2caa0'
 
       - name: Execute 64-object exact replay
-        run: python hou_lens_p492_mixed16/exact_replay.py
+        run: python hou_lens_p492_mixed16/p498_wrapper.py
 
       - name: Encrypt private evidence before upload
         run: |
@@ -102,7 +102,7 @@ jobs:
           python - <<'PY'
           import hashlib,json,pathlib
           p=pathlib.Path('public_result/encrypted_result.cms.der')
-          d={'schema_version':1,'protocol':'HOU-LENS-P4.9.2-MIXED16-EXACT-PAYLOAD-REPLAY','status':'PASS_ENCRYPTED_OUTPUT','object_count':64,'group_count':16,'historical_raw_sha_matches':64,'historical_normalized_sha_matches':64,'manifest_sha256':'ee41c5312b2a6918b0241acbe235970f825e6b5712af392be85dafce9cf524ef','encrypted_result_bytes':p.stat().st_size,'encrypted_result_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'private_plaintext_emitted':False,'scores_computed':False,'model_code_executed':False,'scenario_generation':False}
+          d={'schema_version':1,'protocol':'HOU-LENS-P4.9.8-MIXED16-EXACT-BYTE-REPLAY','status':'PASS_ENCRYPTED_OUTPUT','object_count':64,'group_count':16,'historical_raw_sha_matches':64,'historical_normalized_sha_matches':64,'manifest_sha256':'f55c4796b20a363702a05045fc835daebc81072f9c3b299ef461ea77fea35d5b','encrypted_result_bytes':p.stat().st_size,'encrypted_result_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'private_plaintext_emitted':False,'scores_computed':False,'model_code_executed':False,'scenario_generation':False}
           pathlib.Path('public_result/public_summary.json').write_text(json.dumps(d,sort_keys=True,separators=(',',':'))+'\n')
           print(json.dumps({k:d[k] for k in ['status','object_count','historical_raw_sha_matches','historical_normalized_sha_matches','encrypted_result_bytes','encrypted_result_sha256']},indent=2))
           PY
@@ -111,7 +111,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hou-lens-p492-mixed16-encrypted-result
+          name: hou-lens-p498-mixed16-encrypted-result
           path: public_result/
           if-no-files-found: warn
           retention-days: 90
