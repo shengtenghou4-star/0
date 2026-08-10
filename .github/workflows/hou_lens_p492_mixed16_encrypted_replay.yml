@@ -51,17 +51,23 @@ jobs:
             git fetch -q origin compute/hou-lens-p492-mixed16-encrypted-replay
             if git cat-file -e origin/compute/hou-lens-p492-mixed16-encrypted-replay:hou_lens_p492_mixed16_inbox/envelope.json 2>/dev/null && \
                git cat-file -e origin/compute/hou-lens-p492-mixed16-encrypted-replay:hou_lens_p492_mixed16_inbox/payload.cms.b64 2>/dev/null; then
-              git show origin/compute/hou-lens-p492-mixed16-encrypted-replay:hou_lens_p492_mixed16_inbox/envelope.json > /tmp/env.json
-              addressed=$(python -c "import json;print(json.load(open('/tmp/env.json')).get('runner_cert_sha256',''))")
+              git show origin/compute/hou-lens-p492-mixed16-encrypted-replay:hou_lens_p492_mixed16_inbox/envelope.json > /tmp/env.candidate.json
+              addressed=$(python -c "import json;print(json.load(open('/tmp/env.candidate.json')).get('runner_cert_sha256',''))")
               if [ "$addressed" = "$cert_sha" ]; then
-                git show origin/compute/hou-lens-p492-mixed16-encrypted-replay:hou_lens_p492_mixed16_inbox/payload.cms.b64 > /tmp/payload.b64
-                found=1
-                break
+                git show origin/compute/hou-lens-p492-mixed16-encrypted-replay:hou_lens_p492_mixed16_inbox/payload.cms.b64 > /tmp/payload.candidate.b64
+                expected_payload_sha=$(python -c "import json;print(json.load(open('/tmp/env.candidate.json')).get('payload_base64_sha256',''))")
+                actual_payload_sha=$(sha256sum /tmp/payload.candidate.b64 | awk '{print $1}')
+                if [ -n "$expected_payload_sha" ] && [ "$actual_payload_sha" = "$expected_payload_sha" ]; then
+                  cp /tmp/env.candidate.json /tmp/env.json
+                  cp /tmp/payload.candidate.b64 /tmp/payload.b64
+                  found=1
+                  break
+                fi
               fi
             fi
             sleep 10
           done
-          [ "$found" = 1 ] || { echo 'No correctly addressed ciphertext arrived'; exit 20; }
+          [ "$found" = 1 ] || { echo 'No correctly addressed internally consistent ciphertext arrived'; exit 20; }
           python - <<'PY'
           import hashlib,json,pathlib
           e=json.load(open('/tmp/env.json')); raw=pathlib.Path('/tmp/payload.b64').read_bytes()
@@ -106,7 +112,7 @@ jobs:
           pathlib.Path('public_result/public_summary.json').write_text(json.dumps(d,sort_keys=True,separators=(',',':'))+'\n')
           print(json.dumps({k:d[k] for k in ['status','object_count','historical_raw_sha_matches','historical_normalized_sha_matches','encrypted_result_bytes','encrypted_result_sha256']},indent=2))
           PY
-          rm -rf private_input private_output /tmp/private_input.tar /tmp/private_output.tar /tmp/payload.der /tmp/payload.b64 /tmp/env.json runner_handshake/private.pem
+          rm -rf private_input private_output /tmp/private_input.tar /tmp/private_output.tar /tmp/payload.der /tmp/payload.b64 /tmp/env.json /tmp/env.candidate.json /tmp/payload.candidate.b64 runner_handshake/private.pem
 
       - if: always()
         uses: actions/upload-artifact@v4
