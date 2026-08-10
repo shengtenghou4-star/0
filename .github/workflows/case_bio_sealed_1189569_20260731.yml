@@ -1,0 +1,79 @@
+name: case-bio-sealed-1189569-20260731
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/case_bio_sealed_1189569_20260731.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  fixed-case:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download and verify exact frozen archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p case_output
+          python - <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import urllib.request
+          import zipfile
+
+          record_id = "1189569"
+          filename = "52_R_2_N2_7_Day17_CW_2014_04_09__14_19_11___8___13.wcon.zip"
+          expected_md5 = "dcb95d3f591e54cd6b3d7c72fd7723ba"
+          expected_bytes = 16529142
+          url = "https://zenodo.org/api/records/1189569/files/52_R_2_N2_7_Day17_CW_2014_04_09__14_19_11___8___13.wcon.zip/content"
+          destination = pathlib.Path("case_output") / filename
+          request = urllib.request.Request(url, headers={"User-Agent": "reference-matrix/1.0"})
+          md5 = hashlib.md5(usedforsecurity=False)
+          sha256 = hashlib.sha256()
+          size = 0
+          with urllib.request.urlopen(request, timeout=180) as response, destination.open("wb") as handle:
+              while True:
+                  chunk = response.read(1024 * 1024)
+                  if not chunk:
+                      break
+                  handle.write(chunk)
+                  md5.update(chunk)
+                  sha256.update(chunk)
+                  size += len(chunk)
+          if size != expected_bytes:
+              raise SystemExit(f"Byte-count mismatch: {size}")
+          if md5.hexdigest() != expected_md5:
+              raise SystemExit(f"MD5 mismatch: {md5.hexdigest()}")
+          with zipfile.ZipFile(destination) as archive:
+              bad = archive.testzip()
+              if bad is not None:
+                  raise SystemExit(f"ZIP integrity failure: {bad}")
+              payloads = [name for name in archive.namelist() if name.endswith('.wcon')]
+              if len(payloads) != 1:
+                  raise SystemExit(f"Expected one WCON payload, got {payloads}")
+          receipt = {
+              "schema": "cybergenesis-sealed-download-receipt-v1",
+              "record_id": record_id,
+              "filename": filename,
+              "bytes": size,
+              "md5": md5.hexdigest(),
+              "sha256": sha256.hexdigest(),
+              "wcon_payloads": payloads,
+              "verified": True,
+              "target_scored": False,
+          }
+          pathlib.Path("case_output/DOWNLOAD_RECEIPT.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload fixed-case output
+        uses: actions/upload-artifact@v4
+        with:
+          name: case-bio-sealed-1189569-20260731
+          path: case_output/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
