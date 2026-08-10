@@ -1,0 +1,1 @@
+Capture only the sd02 public download interstitial. No holdout filename or content is requested.

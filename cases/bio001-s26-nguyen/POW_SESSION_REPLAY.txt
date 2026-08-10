@@ -1,0 +1,1 @@
+Replay the captured server-issued ncbi_sid, challenge and verified nonce for sd02 only. No holdout name or content is requested.

@@ -1,0 +1,1 @@
+Twelve independent runner attempts execute the same frozen sd02-sd10 allowlist. sd11-sd13 remain absent from every request.

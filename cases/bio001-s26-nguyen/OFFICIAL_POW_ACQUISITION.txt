@@ -1,0 +1,1 @@
+Run acquire_pow.py for sd02-sd10 only. The worm-4 holdout sd11-sd13 remains unrequested and unopened.
