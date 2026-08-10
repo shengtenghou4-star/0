@@ -47,9 +47,10 @@ jobs:
           set -euo pipefail
           cert_sha=$(cat runner_handshake/cert.sha256)
           found=0
+          branch='compute/hou-lens-p492-mixed16-encrypted-replay'
+          ref="refs/remotes/origin/$branch"
           for i in $(seq 1 360); do
-            git fetch -q origin compute/hou-lens-p492-mixed16-encrypted-replay
-            ref=origin/compute/hou-lens-p492-mixed16-encrypted-replay
+            git fetch -q origin "+refs/heads/$branch:$ref"
             if git cat-file -e "$ref":hou_lens_p492_mixed16_inbox/envelope.json 2>/dev/null; then
               git show "$ref":hou_lens_p492_mixed16_inbox/envelope.json > /tmp/env.candidate.json
               addressed=$(python -c "import json;print(json.load(open('/tmp/env.candidate.json')).get('runner_cert_sha256',''))")
