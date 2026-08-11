@@ -29,7 +29,7 @@ jobs:
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out runner_handshake/private.pem >/dev/null 2>&1
           openssl req -new -x509 -key runner_handshake/private.pem -out runner_handshake/cert.pem -days 1 -subj '/CN=HOU-LENS-P498-GradeA-Ephemeral/' >/dev/null 2>&1
           sha256sum runner_handshake/cert.pem | awk '{print $1}' > runner_handshake/cert.sha256
-          echo '597e37083da1682932f7f67931897c769c2278bc4ef4a3684fa0147914ada636' > runner_handshake/expected_manifest.sha256
+          echo '44aab551ef6af6ed7e8ae82d811d68f5203bee5189909367786e774127200448' > runner_handshake/expected_manifest.sha256
 
       - name: Publish public handshake only
         uses: actions/upload-artifact@v4
@@ -72,7 +72,7 @@ jobs:
           python - <<'PY'
           import hashlib,json,pathlib
           e=json.load(open('/tmp/env.json')); raw=pathlib.Path('/tmp/payload.b64').read_bytes()
-          if e.get('manifest_sha256')!='597e37083da1682932f7f67931897c769c2278bc4ef4a3684fa0147914ada636': raise SystemExit('manifest envelope gate failed')
+          if e.get('manifest_sha256')!='44aab551ef6af6ed7e8ae82d811d68f5203bee5189909367786e774127200448': raise SystemExit('manifest envelope gate failed')
           if e.get('result_cert_sha256')!='3074cc6af3830060533d58d0f3b6aefc4c2d1dfaac4f257e2ab0590a8033b7e5': raise SystemExit('result cert envelope gate failed')
           if hashlib.sha256(raw).hexdigest()!=e.get('payload_base64_sha256'): raise SystemExit('payload base64 SHA gate failed')
           PY
@@ -97,8 +97,21 @@ jobs:
           test "$(git hash-object hou_lens_p495_historical_south/source12_exact/run_selected_target_pipeline.py)" = 'f72edeab83732ef1a05672d8d8e880dcb23c5e6d'
           test "$(git hash-object hou_lens_p495_historical_south/source12_exact/kids_imaging.py)" = '583b5929c05f46d671228cbccc52af5709a2caa0'
 
-      - name: Probe all Grade-A control centroids privately
-        run: python hou_lens_gradea_prospective16/private_bulk_catalog_probe.py
+      - name: Verify frozen catalog-centroid authority
+        run: |
+          python - <<'PY'
+          import hashlib,json,pathlib
+          p=pathlib.Path('private_input/GRADEA_PROSPECTIVE16_EXACT_REPLAY_MANIFEST.json')
+          if hashlib.sha256(p.read_bytes()).hexdigest()!='44aab551ef6af6ed7e8ae82d811d68f5203bee5189909367786e774127200448': raise SystemExit('manifest SHA drift')
+          m=json.loads(p.read_text())
+          if m.get('control_coordinate_authority_sha256')!='688780f5fc58e53371f93f3c0dc6b2857b624cbf9acb21dfafaa9e042ce83534': raise SystemExit('coordinate authority SHA drift')
+          if m.get('control_coordinate_request_sha256')!='b18615d7f8a1e3be27baad05171edb7db38569d7901fecf80d74899ce5403caf': raise SystemExit('coordinate request SHA drift')
+          if m.get('control_coordinate_recovery_run_id')!=31512714228: raise SystemExit('coordinate recovery run drift')
+          objs=m.get('objects',[])
+          if len(objs)!=64 or sum(x.get('role')=='control' for x in objs)!=48 or sum(x.get('role')=='positive' for x in objs)!=16: raise SystemExit('cohort cardinality drift')
+          if m.get('scores_included') is not False: raise SystemExit('score leakage gate failed')
+          print('Catalog-centroid authority bound: 48 controls / 16 positives; private identities suppressed.')
+          PY
 
       - name: Execute 64-object exact replay
         run: python hou_lens_gradea_prospective16/p498_wrapper.py
@@ -118,15 +131,16 @@ jobs:
           import hashlib,json,pathlib
           p=pathlib.Path('public_result/encrypted_result.cms.der')
           agg=pathlib.Path('private_output/aggregate_receipt.json')
-          probe=pathlib.Path('private_output/private_bulk_catalog_probe.json')
           d={
             'schema_version':1,
             'protocol':'HOU-LENS-P4.9.8-GRADEA-ENCRYPTED-PRIVATE-EVIDENCE',
             'status':'PASS_ENCRYPTED_COMPLETE_REPLAY' if agg.exists() else 'ENCRYPTED_FAIL_CLOSED_DIAGNOSTIC',
-            'manifest_sha256':'597e37083da1682932f7f67931897c769c2278bc4ef4a3684fa0147914ada636',
+            'manifest_sha256':'44aab551ef6af6ed7e8ae82d811d68f5203bee5189909367786e774127200448',
             'source_asset_sha256':'bc60c052791683f022754c2d70b5c0a0d21106baffa662a87962c2aaa068bd75',
+            'coordinate_authority_sha256':'688780f5fc58e53371f93f3c0dc6b2857b624cbf9acb21dfafaa9e042ce83534',
+            'coordinate_request_sha256':'b18615d7f8a1e3be27baad05171edb7db38569d7901fecf80d74899ce5403caf',
+            'coordinate_recovery_run_id':31512714228,
             'aggregate_receipt_present':agg.exists(),
-            'private_bulk_catalog_probe_present':probe.exists(),
             'encrypted_result_bytes':p.stat().st_size,
             'encrypted_result_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),
             'private_plaintext_emitted':False,
