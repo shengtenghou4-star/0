@@ -51,15 +51,15 @@ jobs:
           found=0
           for i in $(seq 1 360); do
             git fetch -q origin "+refs/heads/$branch:$ref"
-            if git cat-file -e "$ref":hou_lens_p492_mixed16_inbox/v2/envelope.json 2>/dev/null; then
-              git show "$ref":hou_lens_p492_mixed16_inbox/v2/envelope.json > /tmp/env.json
+            if git cat-file -e "$ref":hou_lens_p492_mixed16_inbox/v3/envelope.json 2>/dev/null; then
+              git show "$ref":hou_lens_p492_mixed16_inbox/v3/envelope.json > /tmp/env.json
               addressed=$(python -c "import json;print(json.load(open('/tmp/env.json')).get('runner_cert_sha256',''))")
               part_count=$(python -c "import json;print(int(json.load(open('/tmp/env.json')).get('payload_part_count',0)))")
-              if [ "$addressed" = "$cert_sha" ] && [ "$part_count" -gt 0 ] && [ "$part_count" -le 16 ]; then
+              if [ "$addressed" = "$cert_sha" ] && [ "$part_count" -gt 0 ] && [ "$part_count" -le 8 ]; then
                 : > /tmp/payload.b64
                 ok=1
                 for part_index in $(seq 0 $((part_count-1))); do
-                  part=$(printf 'hou_lens_p492_mixed16_inbox/v2/part%02d.b64' "$part_index")
+                  part=$(printf 'hou_lens_p492_mixed16_inbox/v3/part%02d.b64' "$part_index")
                   if ! git cat-file -e "$ref:$part" 2>/dev/null; then ok=0; break; fi
                   git show "$ref:$part" >> /tmp/payload.b64
                 done
@@ -68,7 +68,7 @@ jobs:
             fi
             sleep 5
           done
-          [ "$found" = 1 ] || { echo 'No correctly addressed multipart ciphertext arrived'; exit 20; }
+          [ "$found" = 1 ] || { echo 'No correctly addressed compressed multipart ciphertext arrived'; exit 20; }
           python - <<'PY'
           import hashlib,json,pathlib
           e=json.load(open('/tmp/env.json')); raw=pathlib.Path('/tmp/payload.b64').read_bytes()
@@ -78,12 +78,12 @@ jobs:
           PY
           base64 -d /tmp/payload.b64 > /tmp/payload.der
           [ "$(sha256sum /tmp/payload.der | awk '{print $1}')" = "$(python -c "import json;print(json.load(open('/tmp/env.json'))['payload_der_sha256'])")" ] || exit 21
-          openssl cms -decrypt -binary -inform DER -recip runner_handshake/cert.pem -inkey runner_handshake/private.pem -in /tmp/payload.der -out /tmp/private_input.tar
+          openssl cms -decrypt -binary -inform DER -recip runner_handshake/cert.pem -inkey runner_handshake/private.pem -in /tmp/payload.der -out /tmp/private_input.tar.gz
           mkdir private_input
-          tar -xf /tmp/private_input.tar -C private_input
+          tar -xzf /tmp/private_input.tar.gz -C private_input
           test -f private_input/P492_MIXED16_EXACT_REPLAY_MANIFEST.json
           test -f private_input/result-recipient-cert.pem
-          echo 'Encrypted P4.9.8 mixed16 manifest decrypted; private identities suppressed.'
+          echo 'Encrypted compressed P4.9.8 mixed16 manifest decrypted; private identities suppressed.'
 
       - uses: actions/setup-python@v5
         with:
@@ -104,8 +104,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p public_result
-          tar -cf /tmp/private_output.tar private_output
-          openssl cms -encrypt -aes-256-cbc -binary -outform DER -in /tmp/private_output.tar -out public_result/encrypted_result.cms.der private_input/result-recipient-cert.pem
+          tar -czf /tmp/private_output.tar.gz private_output
+          openssl cms -encrypt -aes-256-cbc -binary -outform DER -in /tmp/private_output.tar.gz -out public_result/encrypted_result.cms.der private_input/result-recipient-cert.pem
           python - <<'PY'
           import hashlib,json,pathlib
           p=pathlib.Path('public_result/encrypted_result.cms.der')
@@ -113,7 +113,7 @@ jobs:
           pathlib.Path('public_result/public_summary.json').write_text(json.dumps(d,sort_keys=True,separators=(',',':'))+'\n')
           print(json.dumps({k:d[k] for k in ['status','object_count','historical_raw_sha_matches','historical_normalized_sha_matches','encrypted_result_bytes','encrypted_result_sha256']},indent=2))
           PY
-          rm -rf private_input private_output /tmp/private_input.tar /tmp/private_output.tar /tmp/payload.der /tmp/payload.b64 /tmp/env.json runner_handshake/private.pem
+          rm -rf private_input private_output /tmp/private_input.tar.gz /tmp/private_output.tar.gz /tmp/payload.der /tmp/payload.b64 /tmp/env.json runner_handshake/private.pem
 
       - if: always()
         uses: actions/upload-artifact@v4
