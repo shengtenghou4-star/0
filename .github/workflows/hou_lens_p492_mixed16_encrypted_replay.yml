@@ -29,7 +29,7 @@ jobs:
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out runner_handshake/private.pem >/dev/null 2>&1
           openssl req -new -x509 -key runner_handshake/private.pem -out runner_handshake/cert.pem -days 1 -subj '/CN=HOU-LENS-P498-Mixed16-Ephemeral/' >/dev/null 2>&1
           sha256sum runner_handshake/cert.pem | awk '{print $1}' > runner_handshake/cert.sha256
-          echo 'f55c4796b20a363702a05045fc835daebc81072f9c3b299ef461ea77fea35d5b' > runner_handshake/expected_manifest.sha256
+          echo '4e3cf8bba0137d4a84b5d2dc55351e541446d8ccb84edcf00dc3559214bc1de1' > runner_handshake/expected_manifest.sha256
 
       - name: Publish public handshake only
         uses: actions/upload-artifact@v4
@@ -51,40 +51,22 @@ jobs:
           ref="refs/remotes/origin/$branch"
           for i in $(seq 1 360); do
             git fetch -q origin "+refs/heads/$branch:$ref"
-            if git cat-file -e "$ref":hou_lens_p492_mixed16_inbox/envelope.json 2>/dev/null; then
-              git show "$ref":hou_lens_p492_mixed16_inbox/envelope.json > /tmp/env.candidate.json
-              addressed=$(python -c "import json;print(json.load(open('/tmp/env.candidate.json')).get('runner_cert_sha256',''))")
-              part_count=$(python -c "import json;print(int(json.load(open('/tmp/env.candidate.json')).get('payload_part_count',0)))")
-              if [ "$addressed" = "$cert_sha" ] && [ "$part_count" -gt 0 ] && [ "$part_count" -le 32 ]; then
-                rm -f /tmp/payload.candidate.b64
-                parts_ok=1
-                for part_index in $(seq 0 $((part_count-1))); do
-                  part=$(printf 'hou_lens_p492_mixed16_inbox/parts/part%02d.b64' "$part_index")
-                  if ! git cat-file -e "$ref:$part" 2>/dev/null; then
-                    parts_ok=0
-                    break
-                  fi
-                  git show "$ref:$part" >> /tmp/payload.candidate.b64
-                done
-                if [ "$parts_ok" = 1 ]; then
-                  expected_payload_sha=$(python -c "import json;print(json.load(open('/tmp/env.candidate.json')).get('payload_base64_sha256',''))")
-                  actual_payload_sha=$(sha256sum /tmp/payload.candidate.b64 | awk '{print $1}')
-                  if [ -n "$expected_payload_sha" ] && [ "$actual_payload_sha" = "$expected_payload_sha" ]; then
-                    cp /tmp/env.candidate.json /tmp/env.json
-                    cp /tmp/payload.candidate.b64 /tmp/payload.b64
-                    found=1
-                    break
-                  fi
-                fi
+            if git cat-file -e "$ref":hou_lens_p492_mixed16_inbox/envelope.json 2>/dev/null && git cat-file -e "$ref":hou_lens_p492_mixed16_inbox/payload.cms.b64 2>/dev/null; then
+              git show "$ref":hou_lens_p492_mixed16_inbox/envelope.json > /tmp/env.json
+              addressed=$(python -c "import json;print(json.load(open('/tmp/env.json')).get('runner_cert_sha256',''))")
+              if [ "$addressed" = "$cert_sha" ]; then
+                git show "$ref":hou_lens_p492_mixed16_inbox/payload.cms.b64 > /tmp/payload.b64
+                found=1
+                break
               fi
             fi
             sleep 5
           done
-          [ "$found" = 1 ] || { echo 'No correctly addressed internally consistent multipart ciphertext arrived'; exit 20; }
+          [ "$found" = 1 ] || { echo 'No correctly addressed ciphertext arrived'; exit 20; }
           python - <<'PY'
           import hashlib,json,pathlib
           e=json.load(open('/tmp/env.json')); raw=pathlib.Path('/tmp/payload.b64').read_bytes()
-          if e.get('manifest_sha256')!='f55c4796b20a363702a05045fc835daebc81072f9c3b299ef461ea77fea35d5b': raise SystemExit('manifest envelope gate failed')
+          if e.get('manifest_sha256')!='4e3cf8bba0137d4a84b5d2dc55351e541446d8ccb84edcf00dc3559214bc1de1': raise SystemExit('manifest envelope gate failed')
           if e.get('result_cert_sha256')!='3074cc6af3830060533d58d0f3b6aefc4c2d1dfaac4f257e2ab0590a8033b7e5': raise SystemExit('result cert envelope gate failed')
           if hashlib.sha256(raw).hexdigest()!=e.get('payload_base64_sha256'): raise SystemExit('payload base64 SHA gate failed')
           PY
@@ -121,11 +103,11 @@ jobs:
           python - <<'PY'
           import hashlib,json,pathlib
           p=pathlib.Path('public_result/encrypted_result.cms.der')
-          d={'schema_version':1,'protocol':'HOU-LENS-P4.9.8-MIXED16-EXACT-BYTE-REPLAY','status':'PASS_ENCRYPTED_OUTPUT','object_count':64,'group_count':16,'historical_raw_sha_matches':64,'historical_normalized_sha_matches':64,'manifest_sha256':'f55c4796b20a363702a05045fc835daebc81072f9c3b299ef461ea77fea35d5b','encrypted_result_bytes':p.stat().st_size,'encrypted_result_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'private_plaintext_emitted':False,'scores_computed':False,'model_code_executed':False,'scenario_generation':False}
+          d={'schema_version':1,'protocol':'HOU-LENS-P4.9.8-MIXED16-EXACT-BYTE-REPLAY','status':'PASS_ENCRYPTED_OUTPUT','object_count':64,'group_count':16,'historical_raw_sha_matches':64,'historical_normalized_sha_matches':64,'manifest_sha256':'4e3cf8bba0137d4a84b5d2dc55351e541446d8ccb84edcf00dc3559214bc1de1','encrypted_result_bytes':p.stat().st_size,'encrypted_result_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'private_plaintext_emitted':False,'scores_computed':False,'model_code_executed':False,'scenario_generation':False}
           pathlib.Path('public_result/public_summary.json').write_text(json.dumps(d,sort_keys=True,separators=(',',':'))+'\n')
           print(json.dumps({k:d[k] for k in ['status','object_count','historical_raw_sha_matches','historical_normalized_sha_matches','encrypted_result_bytes','encrypted_result_sha256']},indent=2))
           PY
-          rm -rf private_input private_output /tmp/private_input.tar /tmp/private_output.tar /tmp/payload.der /tmp/payload.b64 /tmp/env.json /tmp/env.candidate.json /tmp/payload.candidate.b64 runner_handshake/private.pem
+          rm -rf private_input private_output /tmp/private_input.tar /tmp/private_output.tar /tmp/payload.der /tmp/payload.b64 /tmp/env.json runner_handshake/private.pem
 
       - if: always()
         uses: actions/upload-artifact@v4
