@@ -1,0 +1,170 @@
+name: LAZARUS P3 exact blob hash public relay v1
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/lazarus-p3-exact-blob-hash-public-relay-v1.yml'
+      - 'cases/lazarus-p3-exact-blob-hash-public-relay-v1/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lazarus-p3-exact-blob-hash-public-relay-v1
+  cancel-in-progress: false
+
+jobs:
+  hash-only:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      LAZARUS_REPO_TOKEN: ${{ secrets.LAZARUS_REPO_TOKEN }}
+      PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+      REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
+      SOURCE_REPOSITORY: shengtenghou4-star/19
+      RESULT_REF: genesis-results/final-development-v1-30443048526
+      RESULT_COMMIT: aad3533aa74fadac743ba6b9b09547cc60b67ab3
+      PREDICTION_BLOB_SHA1: b11f01361ad4ed5a72b80cfa4a4e554e23694e2e
+      CONTRACT_SHA256: 550695906df844d770a3e8255bb7d5c08d69607ec4527365a26f19ff237355ef
+      RUNTIME_SHA256: 5be4f8ff7cf3488e1dbc45c6e909e21ce88b1de5b1caf416ff609dfb1582c47f
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Materialize exact Git blob and hash only
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          token=""
+          token_name=""
+          for name in LAZARUS_REPO_TOKEN PRIVATE_REPO_TOKEN GH_PAT REPO_TOKEN; do
+            value="${!name:-}"
+            if [ -n "$value" ]; then
+              token="$value"
+              token_name="$name"
+              break
+            fi
+          done
+          test -n "$token"
+
+          work="$RUNNER_TEMP/lazarus-p3-hash-only"
+          rm -rf "$work"
+          mkdir -p "$work/repo"
+          cd "$work/repo"
+          git init -q
+          git remote add origin "https://x-access-token:${token}@github.com/${SOURCE_REPOSITORY}.git"
+          git -c advice.detachedHead=false fetch -q --depth=1 origin "$RESULT_COMMIT"
+          test "$(git rev-parse FETCH_HEAD)" = "$RESULT_COMMIT"
+          git checkout -q --detach FETCH_HEAD
+
+          ref_commit="$(git rev-parse "$RESULT_REF^{commit}" 2>/dev/null || true)"
+          if [ -n "$ref_commit" ]; then
+            test "$ref_commit" = "$RESULT_COMMIT"
+          fi
+
+          git cat-file -e "${PREDICTION_BLOB_SHA1}^{blob}"
+          actual_blob_sha1="$(git cat-file blob "$PREDICTION_BLOB_SHA1" | git hash-object --stdin)"
+          test "$actual_blob_sha1" = "$PREDICTION_BLOB_SHA1"
+
+          blob="$work/prediction-blob.bin"
+          git cat-file blob "$PREDICTION_BLOB_SHA1" > "$blob"
+          bytes="$(wc -c < "$blob" | tr -d ' ')"
+          sha_external="$(sha256sum "$blob" | awk '{print $1}')"
+          sha_python="$(BLOB="$blob" python - <<'PY'
+          import hashlib, os
+          from pathlib import Path
+          p = Path(os.environ['BLOB'])
+          h = hashlib.sha256()
+          with p.open('rb') as f:
+              for block in iter(lambda: f.read(1 << 20), b''):
+                  h.update(block)
+          print(h.hexdigest())
+          PY
+          )"
+          test "$sha_external" = "$sha_python"
+
+          status=""
+          if [ "$sha_external" = "$CONTRACT_SHA256" ]; then
+            status="EXACT_GIT_BLOB_MATCHES_FROZEN_CONTRACT_DIGEST"
+          elif [ "$sha_external" = "$RUNTIME_SHA256" ]; then
+            status="EXACT_GIT_BLOB_MATCHES_CONFIRMED_RUNTIME_DIGEST_CONTRACT_SUPERSESSION_REQUIRED"
+          else
+            status="EXACT_GIT_BLOB_THIRD_DIGEST_INTEGRITY_FAILURE"
+          fi
+
+          rm -f "$blob"
+          mkdir -p "$GITHUB_WORKSPACE/cases/lazarus-p3-exact-blob-hash-public-relay-v1/artifacts"
+          RECEIPT="$GITHUB_WORKSPACE/cases/lazarus-p3-exact-blob-hash-public-relay-v1/artifacts/EXACT_BLOB_HASH_RECEIPT.json" \
+          TOKEN_NAME="$token_name" BYTES="$bytes" SHA256="$sha_external" STATUS="$status" \
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          receipt = {
+              'schema_version': '1.0',
+              'project_id': 'LAZ-001',
+              'transaction': 'p3_exact_committed_git_blob_hash_public_relay_v1',
+              'source_repository': os.environ['SOURCE_REPOSITORY'],
+              'result_ref': os.environ['RESULT_REF'],
+              'result_commit': os.environ['RESULT_COMMIT'],
+              'prediction_git_blob_sha1': os.environ['PREDICTION_BLOB_SHA1'],
+              'prediction_git_blob_bytes': int(os.environ['BYTES']),
+              'prediction_git_blob_sha256': os.environ['SHA256'],
+              'independent_hash_implementations_agree': True,
+              'status': os.environ['STATUS'],
+              'credential_slot_used': os.environ['TOKEN_NAME'],
+              'prediction_rows_parsed': 0,
+              'prediction_values_read': 0,
+              'model_fits': 0,
+              'bootstrap_replicates_executed': 0,
+              'august_rows_values': '0/0',
+              'september_rows_values': '0/0',
+          }
+          path = Path(os.environ['RECEIPT'])
+          path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n')
+          print(json.dumps({k: v for k, v in receipt.items() if k != 'credential_slot_used'}, sort_keys=True))
+          PY
+
+          if [ "$status" = "EXACT_GIT_BLOB_THIRD_DIGEST_INTEGRITY_FAILURE" ]; then
+            exit 42
+          fi
+
+      - name: Adversarial receipt boundary check
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('cases/lazarus-p3-exact-blob-hash-public-relay-v1/artifacts/EXACT_BLOB_HASH_RECEIPT.json')
+          r=json.loads(p.read_text())
+          assert r['source_repository']=='shengtenghou4-star/19'
+          assert r['result_commit']=='aad3533aa74fadac743ba6b9b09547cc60b67ab3'
+          assert r['prediction_git_blob_sha1']=='b11f01361ad4ed5a72b80cfa4a4e554e23694e2e'
+          assert r['prediction_rows_parsed']==0
+          assert r['prediction_values_read']==0
+          assert r['model_fits']==0
+          assert r['bootstrap_replicates_executed']==0
+          assert r['august_rows_values']=='0/0'
+          assert r['september_rows_values']=='0/0'
+          assert len(r['prediction_git_blob_sha256'])==64
+          assert r['status'] in {
+              'EXACT_GIT_BLOB_MATCHES_FROZEN_CONTRACT_DIGEST',
+              'EXACT_GIT_BLOB_MATCHES_CONFIRMED_RUNTIME_DIGEST_CONTRACT_SUPERSESSION_REQUIRED',
+          }
+          PY
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lazarus-p3-exact-blob-hash-public-relay-v1
+          path: cases/lazarus-p3-exact-blob-hash-public-relay-v1/artifacts/
+          if-no-files-found: warn
+          retention-days: 1
