@@ -1,0 +1,162 @@
+name: HOU-LENS P4.9.8 Grade-A prospective16 encrypted exact replay
+
+on:
+  pull_request:
+    branches:
+      - compute/hou-lens-p495-historical-south-recovery
+    paths:
+      - 'hou_lens_gradea_prospective16/**'
+      - '.github/workflows/hou_lens_gradea_prospective16_encrypted_replay.yml'
+      - 'hou_lens_gradea_prospective16_launch.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: compute/hou-lens-gradea-prospective16-encrypted-replay
+          fetch-depth: 0
+
+      - name: Generate one-time input recipient certificate
+        run: |
+          set -euo pipefail
+          mkdir -p runner_handshake
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out runner_handshake/private.pem >/dev/null 2>&1
+          openssl req -new -x509 -key runner_handshake/private.pem -out runner_handshake/cert.pem -days 1 -subj '/CN=HOU-LENS-P498-GradeA-Ephemeral/' >/dev/null 2>&1
+          sha256sum runner_handshake/cert.pem | awk '{print $1}' > runner_handshake/cert.sha256
+          echo '44aab551ef6af6ed7e8ae82d811d68f5203bee5189909367786e774127200448' > runner_handshake/expected_manifest.sha256
+
+      - name: Publish public handshake only
+        uses: actions/upload-artifact@v4
+        with:
+          name: hou-lens-p498-gradea-public-handshake
+          path: |
+            runner_handshake/cert.pem
+            runner_handshake/cert.sha256
+            runner_handshake/expected_manifest.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Wait for encrypted private manifest
+        run: |
+          set -euo pipefail
+          cert_sha=$(cat runner_handshake/cert.sha256)
+          branch='compute/hou-lens-gradea-prospective16-transport'
+          ref="refs/remotes/origin/$branch"
+          found=0
+          for i in $(seq 1 360); do
+            git fetch -q origin "+refs/heads/$branch:$ref"
+            if git cat-file -e "$ref":hou_lens_gradea_prospective16_inbox/v2/envelope.json 2>/dev/null; then
+              git show "$ref":hou_lens_gradea_prospective16_inbox/v2/envelope.json > /tmp/env.json
+              addressed=$(python -c "import json;print(json.load(open('/tmp/env.json')).get('runner_cert_sha256',''))")
+              part_count=$(python -c "import json;print(int(json.load(open('/tmp/env.json')).get('payload_part_count',0)))")
+              if [ "$addressed" = "$cert_sha" ] && [ "$part_count" -gt 0 ] && [ "$part_count" -le 8 ]; then
+                : > /tmp/payload.b64
+                ok=1
+                for part_index in $(seq 0 $((part_count-1))); do
+                  part=$(printf 'hou_lens_gradea_prospective16_inbox/v2/part%02d.b64' "$part_index")
+                  if ! git cat-file -e "$ref:$part" 2>/dev/null; then ok=0; break; fi
+                  git show "$ref:$part" >> /tmp/payload.b64
+                done
+                if [ "$ok" = 1 ]; then found=1; break; fi
+              fi
+            fi
+            sleep 5
+          done
+          [ "$found" = 1 ] || { echo 'No correctly addressed Grade-A ciphertext arrived'; exit 20; }
+          python - <<'PY'
+          import hashlib,json,pathlib
+          e=json.load(open('/tmp/env.json')); raw=pathlib.Path('/tmp/payload.b64').read_bytes()
+          if e.get('manifest_sha256')!='44aab551ef6af6ed7e8ae82d811d68f5203bee5189909367786e774127200448': raise SystemExit('manifest envelope gate failed')
+          if e.get('result_cert_sha256')!='3074cc6af3830060533d58d0f3b6aefc4c2d1dfaac4f257e2ab0590a8033b7e5': raise SystemExit('result cert envelope gate failed')
+          if hashlib.sha256(raw).hexdigest()!=e.get('payload_base64_sha256'): raise SystemExit('payload base64 SHA gate failed')
+          PY
+          base64 -d /tmp/payload.b64 > /tmp/payload.der
+          [ "$(sha256sum /tmp/payload.der | awk '{print $1}')" = "$(python -c "import json;print(json.load(open('/tmp/env.json'))['payload_der_sha256'])")" ] || exit 21
+          openssl cms -decrypt -binary -inform DER -recip runner_handshake/cert.pem -inkey runner_handshake/private.pem -in /tmp/payload.der -out /tmp/private_input.tar.gz
+          mkdir private_input
+          tar -xzf /tmp/private_input.tar.gz -C private_input
+          test -f private_input/GRADEA_PROSPECTIVE16_EXACT_REPLAY_MANIFEST.json
+          test -f private_input/result-recipient-cert.pem
+          echo 'Encrypted P4.9.8 Grade-A manifest decrypted; private identities suppressed.'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.13'
+
+      - name: Install exact historical environment
+        run: python -m pip install --disable-pip-version-check requests==2.34.2 numpy==2.5.1 scipy==1.18.0 astropy==8.0.1
+
+      - name: Verify historical source blobs
+        run: |
+          test "$(git hash-object hou_lens_p495_historical_south/source12_exact/run_selected_target_pipeline.py)" = 'f72edeab83732ef1a05672d8d8e880dcb23c5e6d'
+          test "$(git hash-object hou_lens_p495_historical_south/source12_exact/kids_imaging.py)" = '583b5929c05f46d671228cbccc52af5709a2caa0'
+
+      - name: Verify frozen catalog-centroid authority
+        run: |
+          python - <<'PY'
+          import hashlib,json,pathlib
+          p=pathlib.Path('private_input/GRADEA_PROSPECTIVE16_EXACT_REPLAY_MANIFEST.json')
+          if hashlib.sha256(p.read_bytes()).hexdigest()!='44aab551ef6af6ed7e8ae82d811d68f5203bee5189909367786e774127200448': raise SystemExit('manifest SHA drift')
+          m=json.loads(p.read_text())
+          if m.get('control_coordinate_authority_sha256')!='688780f5fc58e53371f93f3c0dc6b2857b624cbf9acb21dfafaa9e042ce83534': raise SystemExit('coordinate authority SHA drift')
+          if m.get('control_coordinate_request_sha256')!='b18615d7f8a1e3be27baad05171edb7db38569d7901fecf80d74899ce5403caf': raise SystemExit('coordinate request SHA drift')
+          if m.get('control_coordinate_recovery_run_id')!=31512714228: raise SystemExit('coordinate recovery run drift')
+          objs=m.get('objects',[])
+          if len(objs)!=64 or sum(x.get('role')=='control' for x in objs)!=48 or sum(x.get('role')=='positive' for x in objs)!=16: raise SystemExit('cohort cardinality drift')
+          if m.get('scores_included') is not False: raise SystemExit('score leakage gate failed')
+          print('Catalog-centroid authority bound: 48 controls / 16 positives; private identities suppressed.')
+          PY
+
+      - name: Execute 64-object exact replay
+        run: python hou_lens_gradea_prospective16/p498_wrapper.py
+
+      - name: Encrypt private evidence before upload
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -d private_output ] || [ ! -f private_input/result-recipient-cert.pem ]; then
+            echo 'No encryptable private evidence exists for this attempt.'
+            exit 0
+          fi
+          mkdir -p public_result
+          tar -czf /tmp/private_output.tar.gz private_output
+          openssl cms -encrypt -aes-256-cbc -binary -outform DER -in /tmp/private_output.tar.gz -out public_result/encrypted_result.cms.der private_input/result-recipient-cert.pem
+          python - <<'PY'
+          import hashlib,json,pathlib
+          p=pathlib.Path('public_result/encrypted_result.cms.der')
+          agg=pathlib.Path('private_output/aggregate_receipt.json')
+          d={
+            'schema_version':1,
+            'protocol':'HOU-LENS-P4.9.8-GRADEA-ENCRYPTED-PRIVATE-EVIDENCE',
+            'status':'PASS_ENCRYPTED_COMPLETE_REPLAY' if agg.exists() else 'ENCRYPTED_FAIL_CLOSED_DIAGNOSTIC',
+            'manifest_sha256':'44aab551ef6af6ed7e8ae82d811d68f5203bee5189909367786e774127200448',
+            'source_asset_sha256':'bc60c052791683f022754c2d70b5c0a0d21106baffa662a87962c2aaa068bd75',
+            'coordinate_authority_sha256':'688780f5fc58e53371f93f3c0dc6b2857b624cbf9acb21dfafaa9e042ce83534',
+            'coordinate_request_sha256':'b18615d7f8a1e3be27baad05171edb7db38569d7901fecf80d74899ce5403caf',
+            'coordinate_recovery_run_id':31512714228,
+            'aggregate_receipt_present':agg.exists(),
+            'encrypted_result_bytes':p.stat().st_size,
+            'encrypted_result_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),
+            'private_plaintext_emitted':False,
+            'scores_computed':False,
+            'model_code_executed':False,
+            'scenario_generation':False,
+          }
+          pathlib.Path('public_result/public_summary.json').write_text(json.dumps(d,sort_keys=True,separators=(',',':'))+'\n')
+          print(json.dumps(d,indent=2))
+          PY
+          rm -rf private_input private_output /tmp/private_input.tar.gz /tmp/private_output.tar.gz /tmp/payload.der /tmp/payload.b64 /tmp/env.json runner_handshake/private.pem
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hou-lens-p498-gradea-encrypted-result
+          path: public_result/
+          if-no-files-found: warn
+          retention-days: 90
