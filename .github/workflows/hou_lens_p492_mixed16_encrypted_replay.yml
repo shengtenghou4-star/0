@@ -97,21 +97,44 @@ jobs:
           test "$(git hash-object hou_lens_p495_historical_south/source12_exact/run_selected_target_pipeline.py)" = 'f72edeab83732ef1a05672d8d8e880dcb23c5e6d'
           test "$(git hash-object hou_lens_p495_historical_south/source12_exact/kids_imaging.py)" = '583b5929c05f46d671228cbccc52af5709a2caa0'
 
+      - name: Probe official KiDS DR5 catalogue privately
+        run: python hou_lens_p492_mixed16/private_catalog_probe.py
+
       - name: Execute 64-object exact replay
         run: python hou_lens_p492_mixed16/p498_wrapper.py
 
       - name: Encrypt private evidence before upload
+        if: always()
         run: |
           set -euo pipefail
+          if [ ! -d private_output ] || [ ! -f private_input/result-recipient-cert.pem ]; then
+            echo 'No encryptable private evidence exists for this attempt.'
+            exit 0
+          fi
           mkdir -p public_result
           tar -czf /tmp/private_output.tar.gz private_output
           openssl cms -encrypt -aes-256-cbc -binary -outform DER -in /tmp/private_output.tar.gz -out public_result/encrypted_result.cms.der private_input/result-recipient-cert.pem
           python - <<'PY'
           import hashlib,json,pathlib
           p=pathlib.Path('public_result/encrypted_result.cms.der')
-          d={'schema_version':1,'protocol':'HOU-LENS-P4.9.8-MIXED16-EXACT-BYTE-REPLAY','status':'PASS_ENCRYPTED_OUTPUT','object_count':64,'group_count':16,'historical_raw_sha_matches':64,'historical_normalized_sha_matches':64,'manifest_sha256':'4e3cf8bba0137d4a84b5d2dc55351e541446d8ccb84edcf00dc3559214bc1de1','encrypted_result_bytes':p.stat().st_size,'encrypted_result_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'private_plaintext_emitted':False,'scores_computed':False,'model_code_executed':False,'scenario_generation':False}
+          agg=pathlib.Path('private_output/aggregate_receipt.json')
+          probe=pathlib.Path('private_output/private_catalog_probe.json')
+          d={
+            'schema_version':1,
+            'protocol':'HOU-LENS-P4.9.8-MIXED16-ENCRYPTED-PRIVATE-EVIDENCE',
+            'status':'PASS_ENCRYPTED_COMPLETE_REPLAY' if agg.exists() else 'ENCRYPTED_FAIL_CLOSED_DIAGNOSTIC',
+            'manifest_sha256':'4e3cf8bba0137d4a84b5d2dc55351e541446d8ccb84edcf00dc3559214bc1de1',
+            'aggregate_receipt_present':agg.exists(),
+            'private_catalog_probe_present':probe.exists(),
+            'encrypted_result_bytes':p.stat().st_size,
+            'encrypted_result_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),
+            'private_plaintext_emitted':False,
+            'scores_computed':False,
+            'model_code_executed':False,
+            'scenario_generation':False,
+          }
           pathlib.Path('public_result/public_summary.json').write_text(json.dumps(d,sort_keys=True,separators=(',',':'))+'\n')
-          print(json.dumps({k:d[k] for k in ['status','object_count','historical_raw_sha_matches','historical_normalized_sha_matches','encrypted_result_bytes','encrypted_result_sha256']},indent=2))
+          print(json.dumps(d,indent=2))
           PY
           rm -rf private_input private_output /tmp/private_input.tar.gz /tmp/private_output.tar.gz /tmp/payload.der /tmp/payload.b64 /tmp/env.json runner_handshake/private.pem
 
