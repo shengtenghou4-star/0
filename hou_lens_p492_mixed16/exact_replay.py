@@ -146,6 +146,7 @@ def main():
                 "--output", str(od), "--radius", "0.01", "--attempts", "5", "--timeout", "240"
             ], stdout=lf, stderr=subprocess.STDOUT)
         if proc.returncode != 0:
+            print(json.dumps({"opaque_index": idx, "diagnostic": "pipeline_technical_failure", "returncode": proc.returncode}, sort_keys=True), flush=True)
             fail(f"historical pipeline technical failure at opaque object index {idx}")
         rp = od / "receipt.json"
         rec = json.loads(rp.read_text())
@@ -164,6 +165,15 @@ def main():
             "historical_normalized_sha_exact": got_norm == x["expected_normalized_cube_sha256"],
         }
         if not all(checks.values()):
+            print(json.dumps({
+                "opaque_index": idx,
+                "diagnostic": "historical_cube_sha_gate_failed",
+                "checks": checks,
+                "actual_raw_sha256": got_raw,
+                "actual_normalized_sha256": got_norm,
+                "actual_receipt_sha256": sha(rp),
+                "expected_receipt_sha256": None,
+            }, sort_keys=True), flush=True)
             fail(f"historical cube SHA gate failed at opaque object index {idx}")
         results.append({
             "opaque_index": f"o{idx:03d}", "target_id": x["target_id"], "group_id": x["group_id"], "role": x["role"],
