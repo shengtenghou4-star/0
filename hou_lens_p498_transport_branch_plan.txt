@@ -1,0 +1,1 @@
+Use dedicated branch compute/hou-lens-p498-mixed16-transport for encrypted input only; workflow head must not be mutated during handshake.

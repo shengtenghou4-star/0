@@ -1,0 +1,147 @@
+name: HOU-LENS P4.9.8 mixed16 encrypted exact replay
+
+on:
+  pull_request:
+    branches:
+      - compute/hou-lens-p495-historical-south-recovery
+    paths:
+      - 'hou_lens_p492_mixed16/**'
+      - '.github/workflows/hou_lens_p492_mixed16_encrypted_replay.yml'
+      - 'hou_lens_p492_mixed16_launch.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: compute/hou-lens-p492-mixed16-encrypted-replay
+          fetch-depth: 0
+
+      - name: Generate one-time input recipient certificate
+        run: |
+          set -euo pipefail
+          mkdir -p runner_handshake
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out runner_handshake/private.pem >/dev/null 2>&1
+          openssl req -new -x509 -key runner_handshake/private.pem -out runner_handshake/cert.pem -days 1 -subj '/CN=HOU-LENS-P498-Mixed16-Ephemeral/' >/dev/null 2>&1
+          sha256sum runner_handshake/cert.pem | awk '{print $1}' > runner_handshake/cert.sha256
+          echo '46fce794408c2f3519acc4aa8ca61c581a69c42b643c98d096b377db3ad6f936' > runner_handshake/expected_manifest.sha256
+
+      - name: Publish public handshake only
+        uses: actions/upload-artifact@v4
+        with:
+          name: hou-lens-p498-mixed16-public-handshake
+          path: |
+            runner_handshake/cert.pem
+            runner_handshake/cert.sha256
+            runner_handshake/expected_manifest.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Wait for encrypted private manifest
+        run: |
+          set -euo pipefail
+          cert_sha=$(cat runner_handshake/cert.sha256)
+          branch='compute/hou-lens-p498-mixed16-transport'
+          ref="refs/remotes/origin/$branch"
+          found=0
+          for i in $(seq 1 360); do
+            git fetch -q origin "+refs/heads/$branch:$ref"
+            if git cat-file -e "$ref":hou_lens_p492_mixed16_inbox/v4/envelope.json 2>/dev/null; then
+              git show "$ref":hou_lens_p492_mixed16_inbox/v4/envelope.json > /tmp/env.json
+              addressed=$(python -c "import json;print(json.load(open('/tmp/env.json')).get('runner_cert_sha256',''))")
+              part_count=$(python -c "import json;print(int(json.load(open('/tmp/env.json')).get('payload_part_count',0)))")
+              if [ "$addressed" = "$cert_sha" ] && [ "$part_count" -gt 0 ] && [ "$part_count" -le 8 ]; then
+                : > /tmp/payload.b64
+                ok=1
+                for part_index in $(seq 0 $((part_count-1))); do
+                  part=$(printf 'hou_lens_p492_mixed16_inbox/v4/part%02d.b64' "$part_index")
+                  if ! git cat-file -e "$ref:$part" 2>/dev/null; then ok=0; break; fi
+                  git show "$ref:$part" >> /tmp/payload.b64
+                done
+                if [ "$ok" = 1 ]; then found=1; break; fi
+              fi
+            fi
+            sleep 5
+          done
+          [ "$found" = 1 ] || { echo 'No correctly addressed compressed multipart ciphertext arrived'; exit 20; }
+          python - <<'PY'
+          import hashlib,json,pathlib
+          e=json.load(open('/tmp/env.json')); raw=pathlib.Path('/tmp/payload.b64').read_bytes()
+          if e.get('manifest_sha256')!='46fce794408c2f3519acc4aa8ca61c581a69c42b643c98d096b377db3ad6f936': raise SystemExit('manifest envelope gate failed')
+          if e.get('result_cert_sha256')!='3074cc6af3830060533d58d0f3b6aefc4c2d1dfaac4f257e2ab0590a8033b7e5': raise SystemExit('result cert envelope gate failed')
+          if hashlib.sha256(raw).hexdigest()!=e.get('payload_base64_sha256'): raise SystemExit('payload base64 SHA gate failed')
+          PY
+          base64 -d /tmp/payload.b64 > /tmp/payload.der
+          [ "$(sha256sum /tmp/payload.der | awk '{print $1}')" = "$(python -c "import json;print(json.load(open('/tmp/env.json'))['payload_der_sha256'])")" ] || exit 21
+          openssl cms -decrypt -binary -inform DER -recip runner_handshake/cert.pem -inkey runner_handshake/private.pem -in /tmp/payload.der -out /tmp/private_input.tar.gz
+          mkdir private_input
+          tar -xzf /tmp/private_input.tar.gz -C private_input
+          test -f private_input/P492_MIXED16_EXACT_REPLAY_MANIFEST.json
+          test -f private_input/result-recipient-cert.pem
+          echo 'Encrypted compressed P4.9.8 mixed16 manifest decrypted; private identities suppressed.'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.13'
+
+      - name: Install exact historical environment
+        run: python -m pip install --disable-pip-version-check requests==2.34.2 numpy==2.5.1 scipy==1.18.0 astropy==8.0.1
+
+      - name: Verify historical source blobs
+        run: |
+          test "$(git hash-object hou_lens_p495_historical_south/source12_exact/run_selected_target_pipeline.py)" = 'f72edeab83732ef1a05672d8d8e880dcb23c5e6d'
+          test "$(git hash-object hou_lens_p495_historical_south/source12_exact/kids_imaging.py)" = '583b5929c05f46d671228cbccc52af5709a2caa0'
+
+      - name: Probe official KiDS DR5 catalogue privately
+        run: python hou_lens_p492_mixed16/private_catalog_probe.py
+
+      - name: Execute 64-object exact replay
+        run: python hou_lens_p492_mixed16/p498_wrapper.py
+
+      - name: Encrypt private evidence before upload
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -d private_output ] || [ ! -f private_input/result-recipient-cert.pem ]; then
+            echo 'No encryptable private evidence exists for this attempt.'
+            exit 0
+          fi
+          mkdir -p public_result
+          tar -czf /tmp/private_output.tar.gz private_output
+          openssl cms -encrypt -aes-256-cbc -binary -outform DER -in /tmp/private_output.tar.gz -out public_result/encrypted_result.cms.der private_input/result-recipient-cert.pem
+          python - <<'PY'
+          import hashlib,json,pathlib
+          p=pathlib.Path('public_result/encrypted_result.cms.der')
+          agg=pathlib.Path('private_output/aggregate_receipt.json')
+          probe=pathlib.Path('private_output/private_catalog_probe.json')
+          d={
+            'schema_version':1,
+            'protocol':'HOU-LENS-P4.9.8-MIXED16-ENCRYPTED-PRIVATE-EVIDENCE',
+            'status':'PASS_ENCRYPTED_COMPLETE_REPLAY' if agg.exists() else 'ENCRYPTED_FAIL_CLOSED_DIAGNOSTIC',
+            'manifest_sha256':'46fce794408c2f3519acc4aa8ca61c581a69c42b643c98d096b377db3ad6f936',
+            'aggregate_receipt_present':agg.exists(),
+            'private_catalog_probe_present':probe.exists(),
+            'encrypted_result_bytes':p.stat().st_size,
+            'encrypted_result_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),
+            'private_plaintext_emitted':False,
+            'scores_computed':False,
+            'model_code_executed':False,
+            'scenario_generation':False,
+          }
+          pathlib.Path('public_result/public_summary.json').write_text(json.dumps(d,sort_keys=True,separators=(',',':'))+'\n')
+          print(json.dumps(d,indent=2))
+          PY
+          rm -rf private_input private_output /tmp/private_input.tar.gz /tmp/private_output.tar.gz /tmp/payload.der /tmp/payload.b64 /tmp/env.json runner_handshake/private.pem
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hou-lens-p498-mixed16-encrypted-result
+          path: public_result/
+          if-no-files-found: warn
+          retention-days: 90
