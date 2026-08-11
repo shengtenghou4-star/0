@@ -46,23 +46,29 @@ jobs:
         run: |
           set -euo pipefail
           cert_sha=$(cat runner_handshake/cert.sha256)
-          found=0
           branch='compute/hou-lens-p492-mixed16-encrypted-replay'
           ref="refs/remotes/origin/$branch"
+          found=0
           for i in $(seq 1 360); do
             git fetch -q origin "+refs/heads/$branch:$ref"
-            if git cat-file -e "$ref":hou_lens_p492_mixed16_inbox/envelope.json 2>/dev/null && git cat-file -e "$ref":hou_lens_p492_mixed16_inbox/payload.cms.b64 2>/dev/null; then
-              git show "$ref":hou_lens_p492_mixed16_inbox/envelope.json > /tmp/env.json
+            if git cat-file -e "$ref":hou_lens_p492_mixed16_inbox/v2/envelope.json 2>/dev/null; then
+              git show "$ref":hou_lens_p492_mixed16_inbox/v2/envelope.json > /tmp/env.json
               addressed=$(python -c "import json;print(json.load(open('/tmp/env.json')).get('runner_cert_sha256',''))")
-              if [ "$addressed" = "$cert_sha" ]; then
-                git show "$ref":hou_lens_p492_mixed16_inbox/payload.cms.b64 > /tmp/payload.b64
-                found=1
-                break
+              part_count=$(python -c "import json;print(int(json.load(open('/tmp/env.json')).get('payload_part_count',0)))")
+              if [ "$addressed" = "$cert_sha" ] && [ "$part_count" -gt 0 ] && [ "$part_count" -le 16 ]; then
+                : > /tmp/payload.b64
+                ok=1
+                for part_index in $(seq 0 $((part_count-1))); do
+                  part=$(printf 'hou_lens_p492_mixed16_inbox/v2/part%02d.b64' "$part_index")
+                  if ! git cat-file -e "$ref:$part" 2>/dev/null; then ok=0; break; fi
+                  git show "$ref:$part" >> /tmp/payload.b64
+                done
+                if [ "$ok" = 1 ]; then found=1; break; fi
               fi
             fi
             sleep 5
           done
-          [ "$found" = 1 ] || { echo 'No correctly addressed ciphertext arrived'; exit 20; }
+          [ "$found" = 1 ] || { echo 'No correctly addressed multipart ciphertext arrived'; exit 20; }
           python - <<'PY'
           import hashlib,json,pathlib
           e=json.load(open('/tmp/env.json')); raw=pathlib.Path('/tmp/payload.b64').read_bytes()
