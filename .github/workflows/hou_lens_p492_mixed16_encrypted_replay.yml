@@ -29,7 +29,7 @@ jobs:
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out runner_handshake/private.pem >/dev/null 2>&1
           openssl req -new -x509 -key runner_handshake/private.pem -out runner_handshake/cert.pem -days 1 -subj '/CN=HOU-LENS-P498-Mixed16-Ephemeral/' >/dev/null 2>&1
           sha256sum runner_handshake/cert.pem | awk '{print $1}' > runner_handshake/cert.sha256
-          echo '4e3cf8bba0137d4a84b5d2dc55351e541446d8ccb84edcf00dc3559214bc1de1' > runner_handshake/expected_manifest.sha256
+          echo '46fce794408c2f3519acc4aa8ca61c581a69c42b643c98d096b377db3ad6f936' > runner_handshake/expected_manifest.sha256
 
       - name: Publish public handshake only
         uses: actions/upload-artifact@v4
@@ -72,7 +72,7 @@ jobs:
           python - <<'PY'
           import hashlib,json,pathlib
           e=json.load(open('/tmp/env.json')); raw=pathlib.Path('/tmp/payload.b64').read_bytes()
-          if e.get('manifest_sha256')!='4e3cf8bba0137d4a84b5d2dc55351e541446d8ccb84edcf00dc3559214bc1de1': raise SystemExit('manifest envelope gate failed')
+          if e.get('manifest_sha256')!='46fce794408c2f3519acc4aa8ca61c581a69c42b643c98d096b377db3ad6f936': raise SystemExit('manifest envelope gate failed')
           if e.get('result_cert_sha256')!='3074cc6af3830060533d58d0f3b6aefc4c2d1dfaac4f257e2ab0590a8033b7e5': raise SystemExit('result cert envelope gate failed')
           if hashlib.sha256(raw).hexdigest()!=e.get('payload_base64_sha256'): raise SystemExit('payload base64 SHA gate failed')
           PY
@@ -123,7 +123,7 @@ jobs:
             'schema_version':1,
             'protocol':'HOU-LENS-P4.9.8-MIXED16-ENCRYPTED-PRIVATE-EVIDENCE',
             'status':'PASS_ENCRYPTED_COMPLETE_REPLAY' if agg.exists() else 'ENCRYPTED_FAIL_CLOSED_DIAGNOSTIC',
-            'manifest_sha256':'4e3cf8bba0137d4a84b5d2dc55351e541446d8ccb84edcf00dc3559214bc1de1',
+            'manifest_sha256':'46fce794408c2f3519acc4aa8ca61c581a69c42b643c98d096b377db3ad6f936',
             'aggregate_receipt_present':agg.exists(),
             'private_catalog_probe_present':probe.exists(),
             'encrypted_result_bytes':p.stat().st_size,
