@@ -29,7 +29,7 @@ jobs:
           openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out runner_handshake/private.pem >/dev/null 2>&1
           openssl req -new -x509 -key runner_handshake/private.pem -out runner_handshake/cert.pem -days 1 -subj '/CN=HOU-LENS-P498-GradeA-Ephemeral/' >/dev/null 2>&1
           sha256sum runner_handshake/cert.pem | awk '{print $1}' > runner_handshake/cert.sha256
-          echo '67ea4a82fab65955dd3d0efbcc86b159c46eed0787a2963a3fc38dff63252553' > runner_handshake/expected_manifest.sha256
+          echo '597e37083da1682932f7f67931897c769c2278bc4ef4a3684fa0147914ada636' > runner_handshake/expected_manifest.sha256
 
       - name: Publish public handshake only
         uses: actions/upload-artifact@v4
@@ -72,7 +72,7 @@ jobs:
           python - <<'PY'
           import hashlib,json,pathlib
           e=json.load(open('/tmp/env.json')); raw=pathlib.Path('/tmp/payload.b64').read_bytes()
-          if e.get('manifest_sha256')!='67ea4a82fab65955dd3d0efbcc86b159c46eed0787a2963a3fc38dff63252553': raise SystemExit('manifest envelope gate failed')
+          if e.get('manifest_sha256')!='597e37083da1682932f7f67931897c769c2278bc4ef4a3684fa0147914ada636': raise SystemExit('manifest envelope gate failed')
           if e.get('result_cert_sha256')!='3074cc6af3830060533d58d0f3b6aefc4c2d1dfaac4f257e2ab0590a8033b7e5': raise SystemExit('result cert envelope gate failed')
           if hashlib.sha256(raw).hexdigest()!=e.get('payload_base64_sha256'): raise SystemExit('payload base64 SHA gate failed')
           PY
@@ -123,7 +123,7 @@ jobs:
             'schema_version':1,
             'protocol':'HOU-LENS-P4.9.8-GRADEA-ENCRYPTED-PRIVATE-EVIDENCE',
             'status':'PASS_ENCRYPTED_COMPLETE_REPLAY' if agg.exists() else 'ENCRYPTED_FAIL_CLOSED_DIAGNOSTIC',
-            'manifest_sha256':'67ea4a82fab65955dd3d0efbcc86b159c46eed0787a2963a3fc38dff63252553',
+            'manifest_sha256':'597e37083da1682932f7f67931897c769c2278bc4ef4a3684fa0147914ada636',
             'source_asset_sha256':'bc60c052791683f022754c2d70b5c0a0d21106baffa662a87962c2aaa068bd75',
             'aggregate_receipt_present':agg.exists(),
             'private_bulk_catalog_probe_present':probe.exists(),
