@@ -1,0 +1,1 @@
+Superseded: PR-head inbox transport self-triggered new pull_request workflow runs. P4.9.8 now uses a dedicated non-PR transport branch so ciphertext delivery cannot rotate the active runner certificate.
